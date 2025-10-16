@@ -1,9 +1,6 @@
 """
-"An Explainable AI based Decision Support System for Waste Sorting Systems"
-
-Produces: Table 2 (Model Comparison),
-Figure 2 (Confusion Matrices),
-Figure 3 (XAI Comparison)
+Waste Sorting CNN Model Comparison
+Evaluates ResNet50, EfficientNetV2B0, and MobileNetV2 with XAI analysis
 """
 
 import os
@@ -17,8 +14,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.applications import EfficientNetV2B0
-from tensorflow.keras.applications import ResNet50, MobileNetV2
+from tensorflow.keras.applications import ResNet50, EfficientNetV2B0, MobileNetV2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 from PIL import Image
@@ -26,16 +22,14 @@ from lime import lime_image
 from sklearn.metrics import classification_report, confusion_matrix
 
 
-# ==================== CONFIGURATION ====================
 DATA_ROOT = os.environ.get("WASTE_DATA_ROOT", "./data")
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
-EPOCHS = 20  # Reduced for paper experiment
+EPOCHS = 20
 OUTPUT_DIR = "paper_outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ==================== DATA LOADING ====================
 def load_data():
     """Load train, val, test generators."""
     if not os.path.exists(DATA_ROOT):
@@ -89,7 +83,6 @@ def load_data():
     return train, val, test, list(train.class_indices.keys())
 
 
-# ==================== MODEL BUILDING ====================
 def build_model(arch, num_classes):
     """Build and compile model."""
     base_models = {
@@ -127,7 +120,6 @@ def build_model(arch, num_classes):
     return model
 
 
-# ==================== TRAINING & EVALUATION ====================
 def train_and_evaluate(arch, train_gen, val_gen, test_gen):
     """Train model and return metrics."""
     print(f"\nTraining {arch}...")
@@ -164,7 +156,6 @@ def train_and_evaluate(arch, train_gen, val_gen, test_gen):
     }
 
 
-# ==================== TABLE 2: MODEL COMPARISON ====================
 def generate_comparison_table(results_dict, class_names):
     """Generate Table 2 for paper."""
     data = []
@@ -197,7 +188,6 @@ def generate_comparison_table(results_dict, class_names):
     return df
 
 
-# ==================== FIGURE 2: CONFUSION MATRICES ====================
 def plot_confusion_matrices(results_dict, class_names):
     """Generate Figure 2: 3 confusion matrices side-by-side."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -230,15 +220,30 @@ def plot_confusion_matrices(results_dict, class_names):
     print(f"Figure 2 saved: {OUTPUT_DIR}/figure2_confusion_matrices.png")
 
 
-# ==================== FIGURE 3: XAI COMPARISON ====================
 def generate_xai_figure(model, test_path, class_names, model_name):
     """Generate Figure 3: XAI methods comparison (Grad-CAM, LIME)."""
 
-    last_conv = {
-        "ResNet50": "conv5_block3_out",
-        "EfficientNetB0": "top_conv",
-        "MobileNetV2": "out_relu",
-    }[model_name]
+    # Find the last convolutional layer dynamically
+    def get_last_conv_layer(model):
+        """Find the last convolutional layer in the model."""
+        for layer in reversed(model.layers):
+            # Check if it's a conv layer or has conv layers inside
+            if (
+                len(layer.output.shape) == 4
+            ):  # Conv layers have 4D output (batch, h, w, channels)
+                return layer.name
+        return None
+
+    last_conv = get_last_conv_layer(model)
+
+    if last_conv is None:
+        print(f"Warning: Could not find convolutional layer for {model_name}")
+        # Fallback: try to find it in the base model
+        for layer in model.layers:
+            if hasattr(layer, "layers"):  # It's a functional model (base model)
+                last_conv = get_last_conv_layer(layer)
+                if last_conv:
+                    break
 
     sample_images = []
     for cls in class_names[:6]:
@@ -268,33 +273,58 @@ def generate_xai_figure(model, test_path, class_names, model_name):
         )
         axes[i, 0].axis("off")
 
-        try:
-            grad_model = keras.models.Model(
-                [model.inputs], [model.get_layer(last_conv).output, model.output]
+        # Grad-CAM
+        if last_conv:
+            try:
+                # Get the model up to the last conv layer
+                last_conv_layer = None
+                for layer in model.layers:
+                    if layer.name == last_conv:
+                        last_conv_layer = layer
+                        break
+                    # Check nested models (base models)
+                    if hasattr(layer, "layers"):
+                        try:
+                            last_conv_layer = layer.get_layer(last_conv)
+                            break
+                        except:
+                            pass
+
+                if last_conv_layer is None:
+                    raise ValueError(f"Layer {last_conv} not found")
+
+                grad_model = keras.models.Model(
+                    [model.inputs], [last_conv_layer.output, model.output]
+                )
+
+                with tf.GradientTape() as tape:
+                    conv_out, preds = grad_model(np.expand_dims(img_array, 0))
+                    top_idx = tf.argmax(preds[0])
+                    top_class = preds[:, top_idx]
+
+                grads = tape.gradient(top_class, conv_out)
+                pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+                heatmap = conv_out[0] @ pooled_grads[..., tf.newaxis]
+                heatmap = tf.squeeze(heatmap)
+                heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
+                heatmap = heatmap.numpy()
+
+                heatmap_resized = np.array(
+                    Image.fromarray((heatmap * 255).astype(np.uint8)).resize(img.size)
+                )
+
+                axes[i, 1].imshow(img)
+                axes[i, 1].imshow(heatmap_resized, cmap="jet", alpha=0.4)
+                axes[i, 1].set_title("Grad-CAM")
+                axes[i, 1].axis("off")
+            except Exception as e:
+                print(f"  Grad-CAM failed for image {i}: {str(e)}")
+                axes[i, 1].text(0.5, 0.5, "Grad-CAM\nFailed", ha="center", va="center")
+                axes[i, 1].axis("off")
+        else:
+            axes[i, 1].text(
+                0.5, 0.5, "Grad-CAM\nNo Conv Layer", ha="center", va="center"
             )
-
-            with tf.GradientTape() as tape:
-                conv_out, preds = grad_model(np.expand_dims(img_array, 0))
-                top_idx = tf.argmax(preds[0])
-                top_class = preds[:, top_idx]
-
-            grads = tape.gradient(top_class, conv_out)
-            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-            heatmap = conv_out[0] @ pooled_grads[..., tf.newaxis]
-            heatmap = tf.squeeze(heatmap)
-            heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-            heatmap = heatmap.numpy()
-
-            heatmap_resized = np.array(
-                Image.fromarray((heatmap * 255).astype(np.uint8)).resize(img.size)
-            )
-
-            axes[i, 1].imshow(img)
-            axes[i, 1].imshow(heatmap_resized, cmap="jet", alpha=0.4)
-            axes[i, 1].set_title("Grad-CAM")
-            axes[i, 1].axis("off")
-        except:
-            axes[i, 1].text(0.5, 0.5, "Grad-CAM\nFailed", ha="center", va="center")
             axes[i, 1].axis("off")
 
         try:
@@ -327,7 +357,6 @@ def generate_xai_figure(model, test_path, class_names, model_name):
     print(f"Figure 3 saved: {OUTPUT_DIR}/figure3_xai_comparison.png")
 
 
-# ==================== MAIN EXECUTION ====================
 def main():
     print("=" * 60)
     print("MODEL COMPARISON FOR SCIENTIFIC PAPER")

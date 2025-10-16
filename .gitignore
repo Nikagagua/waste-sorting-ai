@@ -1,26 +1,13 @@
-# Python-generated files
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
 *.egg-info
+.venv/
+data/
+.DS_Store
 
-# Virtual environments
-.venv
-
-# Tex files
+# LaTeX auxiliary files
 *.aux
-*.bbl
-*.blg
-*.brf
-*.idx
-*.ilg
-*.ind
-*.lof
 *.log
-*.lot
 *.out
-*.toc
 *.fls
 *.fdb_latexmk
