@@ -3,7 +3,6 @@
 Implementation of "An Explainable AI based Decision Support System for Waste Sorting Systems"
 
 **Author**: Nika Gagua
-**Institution**: Kutaisi International University
 **Contact**: Nika.Gagua@kiu.edu.ge
 
 ## Overview
