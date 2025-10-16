@@ -95,10 +95,7 @@ def build_model(arch, num_classes):
         base = base_models[arch](
             include_top=False, weights="imagenet", input_shape=IMG_SIZE + (3,)
         )
-    except (ValueError, OSError) as e:
-        print(
-            f"  Warning: Could not load ImageNet weights for {arch}, training from scratch"
-        )
+    except (ValueError, OSError):
         base = base_models[arch](
             include_top=False, weights=None, input_shape=IMG_SIZE + (3,)
         )
@@ -157,7 +154,7 @@ def train_and_evaluate(arch, train_gen, val_gen, test_gen):
 
 
 def generate_comparison_table(results_dict, class_names):
-    """Generate Table 2 for paper."""
+    """Generate performance comparison table."""
     data = []
     for name, res in results_dict.items():
         data.append(
@@ -171,11 +168,8 @@ def generate_comparison_table(results_dict, class_names):
         )
 
     df = pd.DataFrame(data)
-
     df.to_csv(f"{OUTPUT_DIR}/table2_model_comparison.csv", index=False)
-    print("\nTable 2: Model Performance Comparison")
     print(df.to_string(index=False))
-    print(f"\nSaved to: {OUTPUT_DIR}/table2_model_comparison.csv")
 
     with open(f"{OUTPUT_DIR}/table2_model_comparison.tex", "w") as f:
         f.write(
@@ -189,7 +183,7 @@ def generate_comparison_table(results_dict, class_names):
 
 
 def plot_confusion_matrices(results_dict, class_names):
-    """Generate Figure 2: 3 confusion matrices side-by-side."""
+    """Generate confusion matrices visualization."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
     for ax, (name, res) in zip(axes, results_dict.items()):
@@ -217,33 +211,23 @@ def plot_confusion_matrices(results_dict, class_names):
         f"{OUTPUT_DIR}/figure2_confusion_matrices.png", dpi=300, bbox_inches="tight"
     )
     plt.close()
-    print(f"Figure 2 saved: {OUTPUT_DIR}/figure2_confusion_matrices.png")
 
 
 def generate_xai_figure(model, test_path, class_names, model_name):
-    """Generate Figure 3: XAI methods comparison (Grad-CAM, LIME)."""
+    """Generate XAI visualizations (Grad-CAM, LIME)."""
 
-    # Find the last convolutional layer dynamically
-    def get_last_conv_layer(model):
-        """Find the last convolutional layer in the model."""
-        for layer in reversed(model.layers):
-            # Check if it's a conv layer or has conv layers inside
-            if (
-                len(layer.output.shape) == 4
-            ):  # Conv layers have 4D output (batch, h, w, channels)
-                return layer.name
+    def find_last_conv_layer(m):
+        """Recursively find the last conv layer."""
+        for layer in reversed(m.layers):
+            if len(layer.output.shape) == 4:
+                return layer
+            if hasattr(layer, "layers"):
+                found = find_last_conv_layer(layer)
+                if found:
+                    return found
         return None
 
-    last_conv = get_last_conv_layer(model)
-
-    if last_conv is None:
-        print(f"Warning: Could not find convolutional layer for {model_name}")
-        # Fallback: try to find it in the base model
-        for layer in model.layers:
-            if hasattr(layer, "layers"):  # It's a functional model (base model)
-                last_conv = get_last_conv_layer(layer)
-                if last_conv:
-                    break
+    last_conv_layer = find_last_conv_layer(model)
 
     sample_images = []
     for cls in class_names[:6]:
@@ -273,26 +257,8 @@ def generate_xai_figure(model, test_path, class_names, model_name):
         )
         axes[i, 0].axis("off")
 
-        # Grad-CAM
-        if last_conv:
+        if last_conv_layer:
             try:
-                # Get the model up to the last conv layer
-                last_conv_layer = None
-                for layer in model.layers:
-                    if layer.name == last_conv:
-                        last_conv_layer = layer
-                        break
-                    # Check nested models (base models)
-                    if hasattr(layer, "layers"):
-                        try:
-                            last_conv_layer = layer.get_layer(last_conv)
-                            break
-                        except:
-                            pass
-
-                if last_conv_layer is None:
-                    raise ValueError(f"Layer {last_conv} not found")
-
                 grad_model = keras.models.Model(
                     [model.inputs], [last_conv_layer.output, model.output]
                 )
@@ -318,16 +284,15 @@ def generate_xai_figure(model, test_path, class_names, model_name):
                 axes[i, 1].set_title("Grad-CAM")
                 axes[i, 1].axis("off")
             except Exception as e:
-                print(f"  Grad-CAM failed for image {i}: {str(e)}")
-                axes[i, 1].text(0.5, 0.5, "Grad-CAM\nFailed", ha="center", va="center")
+                axes[i, 1].text(0.5, 0.5, "Error", ha="center", va="center")
                 axes[i, 1].axis("off")
         else:
-            axes[i, 1].text(
-                0.5, 0.5, "Grad-CAM\nNo Conv Layer", ha="center", va="center"
-            )
+            axes[i, 1].text(0.5, 0.5, "N/A", ha="center", va="center")
             axes[i, 1].axis("off")
 
         try:
+            from skimage.segmentation import mark_boundaries
+
             explainer = lime_image.LimeImageExplainer()
             explanation = explainer.explain_instance(
                 (img_array * 255).astype(np.uint8),
@@ -339,14 +304,12 @@ def generate_xai_figure(model, test_path, class_names, model_name):
                 np.argmax(pred), positive_only=True, num_features=5, hide_rest=False
             )
 
-            from skimage.segmentation import mark_boundaries
-
             lime_vis = mark_boundaries(temp / 255.0, mask)
             axes[i, 2].imshow(lime_vis)
             axes[i, 2].set_title("LIME")
             axes[i, 2].axis("off")
         except:
-            axes[i, 2].text(0.5, 0.5, "LIME\nFailed", ha="center", va="center")
+            axes[i, 2].text(0.5, 0.5, "Error", ha="center", va="center")
             axes[i, 2].axis("off")
 
     plt.tight_layout()
@@ -354,38 +317,30 @@ def generate_xai_figure(model, test_path, class_names, model_name):
         f"{OUTPUT_DIR}/figure3_xai_comparison.png", dpi=300, bbox_inches="tight"
     )
     plt.close()
-    print(f"Figure 3 saved: {OUTPUT_DIR}/figure3_xai_comparison.png")
 
 
 def main():
-    print("=" * 60)
-    print("MODEL COMPARISON FOR SCIENTIFIC PAPER")
-    print("=" * 60)
-
-    print("\n[1/4] Loading data...")
+    print("Loading data...")
     train_gen, val_gen, test_gen, class_names = load_data()
     print(f"Classes: {class_names}")
     print(
         f"Train: {train_gen.samples}, Val: {val_gen.samples}, Test: {test_gen.samples}"
     )
 
-    # Train models
-    print("\n[2/4] Training models...")
+    print("\nTraining models...")
     models = ["ResNet50", "EfficientNetB0", "MobileNetV2"]
     results = {}
 
     for arch in models:
         results[arch] = train_and_evaluate(arch, train_gen, val_gen, test_gen)
 
-    # Generate Table 2
-    print("\n[3/4] Generating Table 2: Model Comparison...")
+    print("\nGenerating comparison table...")
     comparison_df = generate_comparison_table(results, class_names)
 
-    print("\n[4/4] Generating figures...")
+    print("\nGenerating figures...")
     plot_confusion_matrices(results, class_names)
 
     best_model = max(results.items(), key=lambda x: x[1]["accuracy"])
-    print(f"\nGenerating XAI figure using best model: {best_model[0]}...")
     generate_xai_figure(
         best_model[1]["model"],
         os.path.join(DATA_ROOT, "test"),
@@ -393,15 +348,8 @@ def main():
         best_model[0],
     )
 
-    print("\n" + "=" * 60)
-    print("RESULTS GENERATED FOR PAPER")
-    print("=" * 60)
-    print(f"\nBest Model: {best_model[0]} (Acc: {best_model[1]['accuracy']:.3f})")
-    print(f"\nOutputs in: {OUTPUT_DIR}/")
-    print("  ✓ table2_model_comparison.csv (and .tex)")
-    print("  ✓ figure2_confusion_matrices.png")
-    print("  ✓ figure3_xai_comparison.png")
-    print("\nReady to insert into your paper!")
+    print(f"\nBest model: {best_model[0]} (accuracy: {best_model[1]['accuracy']:.3f})")
+    print(f"Output directory: {OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":
