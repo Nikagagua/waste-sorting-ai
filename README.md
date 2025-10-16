@@ -1,145 +1,112 @@
-# Waste Sorting Decision Support System - Implementation
+# Waste Sorting Decision Support System
 
-**Paper**: "An Explainable AI based Decision Support System for Waste Sorting Systems"
-**Code Author**: Nika Gagua
-**Date**: October 2025
+Implementation of "An Explainable AI based Decision Support System for Waste Sorting Systems"
 
----
+**Author**: Nika Gagua
+**Institution**: Kutaisi International University
+**Contact**: Nika.Gagua@kiu.edu.ge
 
-## What This Code Does
+## Overview
 
-This script implements the complete experimental methodology described in Section 4 of our paper:
+Comparative evaluation of CNN architectures (ResNet50, EfficientNetV2B0, MobileNetV2) for waste classification with explainability analysis using Grad-CAM and LIME.
 
-1. ✅ **Trains 3 CNN models**: ResNet50, EfficientNet-B0, MobileNetV2
-2. ✅ **Evaluates performance**: Accuracy, Precision, Recall, F1-Score
-3. ✅ **Generates paper figures**:
-   - Table 2: Model Performance Comparison
-   - Figure 2: Confusion Matrices (all 3 models)
-   - Figure 3: XAI Visualizations (Grad-CAM + LIME)
-
----
-
-## Quick Setup
-
-### 1. Install Dependencies
+## Installation
 
 ```bash
 pip install uv
 uv sync
 ```
 
-### 2. Prepare Data
+## Dataset Preparation
 
-Place TrashNet dataset in this structure:
+### Option 1: Automatic Download
+
+```bash
+uv run download_data.py
+```
+
+### Option 2: Manual Setup
+
+Download TrashNet dataset from https://github.com/garythung/trashnet and organize as:
 
 ```
 data/
-├── train/
-│   ├── cardboard/
-│   ├── glass/
-│   ├── metal/
-│   ├── paper/
-│   ├── plastic/
-│   └── trash/
-├── val/
-└── test/
+├── train/<class_name>/*.jpg
+├── val/<class_name>/*.jpg
+└── test/<class_name>/*.jpg
 ```
 
-**Download from**: https://github.com/garythung/trashnet
+Classes: cardboard, glass, metal, paper, plastic, trash
 
-**Alternative**: Set custom data path via environment variable:
+### Custom Data Path
 
 ```bash
-export WASTE_DATA_ROOT=/path/to/your/data
+export WASTE_DATA_ROOT=/path/to/dataset
 ```
 
-### 3. Run Experiment
+## Usage
 
 ```bash
 uv run model_comparison.py
 ```
 
-**Runtime**: ~1 hour (with GPU) or ~3-4 hours (CPU only)
+Training time: 1-4 hours depending on hardware.
 
----
+## Output
 
-## Output Files
+Results are saved to `paper_outputs/`:
 
-Results saved to `paper_outputs/`:
-
-```
-paper_outputs/
-├── table2_model_comparison.csv    # For Table 2 in paper
-├── table2_model_comparison.tex    # LaTeX version
-├── figure2_confusion_matrices.png # For Figure 2
-└── figure3_xai_comparison.png     # For Figure 3
-```
-
----
+- `table2_model_comparison.csv` - Performance metrics
+- `table2_model_comparison.tex` - LaTeX table
+- `figure2_confusion_matrices.png` - Confusion matrices
+- `figure3_xai_comparison.png` - XAI visualizations
 
 ## Configuration
 
-The script uses `./data` by default. To change settings, edit `model_comparison.py`:
+Edit `model_comparison.py` to adjust:
 
 ```python
-DATA_ROOT = os.environ.get("WASTE_DATA_ROOT", "./data")  # Or set env variable
-EPOCHS = 20                        # Training epochs
-BATCH_SIZE = 32                    # Adjust for GPU memory
+DATA_ROOT = os.environ.get("WASTE_DATA_ROOT", "./data")
+EPOCHS = 20
+BATCH_SIZE = 32
+IMG_SIZE = (224, 224)
 ```
 
----
+## Performance
 
-## Expected Results
+Expected metrics on TrashNet dataset:
 
-Example output (actual values depend on data splits):
+| Model            | Accuracy | Precision | Recall | F1-Score |
+| ---------------- | -------- | --------- | ------ | -------- |
+| ResNet50         | ~0.92    | ~0.91     | ~0.91  | ~0.91    |
+| EfficientNetV2B0 | ~0.94    | ~0.93     | ~0.93  | ~0.93    |
+| MobileNetV2      | ~0.90    | ~0.89     | ~0.89  | ~0.89    |
 
-| Model          | Accuracy | Precision | Recall | F1-Score |
-| -------------- | -------- | --------- | ------ | -------- |
-| ResNet50       | ~0.92    | ~0.91     | ~0.91  | ~0.91    |
-| EfficientNetB0 | ~0.94    | ~0.93     | ~0.93  | ~0.93    |
-| MobileNetV2    | ~0.90    | ~0.89     | ~0.89  | ~0.89    |
-
----
+_Results vary with train/test split randomization._
 
 ## Troubleshooting
 
-**Problem**: Out of memory
-**Solution**: Reduce `BATCH_SIZE` to 16 or 8
+| Issue           | Solution                                        |
+| --------------- | ----------------------------------------------- |
+| Out of memory   | Reduce `BATCH_SIZE` to 16 or 8                  |
+| Missing modules | Run `uv sync`                                   |
+| Data not found  | Run `download_data.py` or set `WASTE_DATA_ROOT` |
 
-**Problem**: No GPU detected
-**Solution**: Code works on CPU (just slower)
-
-**Problem**: Module not found
-**Solution**: `uv sync`
-
----
-
-## Next Steps for Paper
-
-Once you run this and review results:
-
-1. Insert Table 2 into Results section (Section 5.1)
-2. Insert Figure 2 into Results section (Section 5.2)
-3. Insert Figure 3 into XAI section (Section 5.3)
-4. We can discuss results and write the discussion
-
----
-
-## Files Included
+## Project Structure
 
 ```
-waste-sorting-dss/
-├── README.md                    # This file
-├── model_comparison.py          # Main script
-└── project.toml             # Python packages
+waste-sorting-ai/
+├── model_comparison.py    # Main training script
+├── download_data.py       # Dataset preparation
+├── pyproject.toml         # Dependencies
+└── README.md              # Documentation
 ```
 
----
+## Citation
 
-## Contact
+If you use this code, please cite:
 
-Nika Gagua
-Nika.Gagua@kiu.edu.ge
-Kutaisi International University
-
-For questions or modifications, please let me know.
+```
+Gagua, N. (2025). An Explainable AI based Decision Support System
+for Waste Sorting Systems. Kutaisi International University.
+```
