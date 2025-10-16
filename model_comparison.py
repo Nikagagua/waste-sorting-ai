@@ -17,9 +17,9 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications import ResNet50, MobileNetV2
 from tensorflow.keras.applications import EfficientNetV2B0
+from tensorflow.keras.applications import ResNet50, MobileNetV2
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 from PIL import Image
 from lime import lime_image
@@ -103,7 +103,6 @@ def build_model(arch, num_classes):
             include_top=False, weights="imagenet", input_shape=IMG_SIZE + (3,)
         )
     except (ValueError, OSError) as e:
-        # If imagenet weights fail, try without pre-trained weights
         print(
             f"  Warning: Could not load ImageNet weights for {arch}, training from scratch"
         )
