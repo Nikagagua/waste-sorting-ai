@@ -219,8 +219,13 @@ def generate_xai_figure(model, test_path, class_names, model_name):
     def find_last_conv_layer(m):
         """Recursively find the last conv layer."""
         for layer in reversed(m.layers):
-            if len(layer.output.shape) == 4:
-                return layer
+            if isinstance(layer.output, list):
+                if len(layer.output[0].shape) == 4:
+                    return layer
+            else:
+                if len(layer.output.shape) == 4:
+                    return layer
+
             if hasattr(layer, "layers"):
                 found = find_last_conv_layer(layer)
                 if found:
@@ -268,9 +273,13 @@ def generate_xai_figure(model, test_path, class_names, model_name):
                 with tf.GradientTape() as tape:
                     conv_outputs, predictions = grad_model(img_tensor)
                     pred_index = tf.argmax(predictions[0])
-                    class_channel = predictions[:, pred_index]
+                    one_hot = tf.one_hot([pred_index], depth=predictions.shape[-1])
+                    class_channel = tf.reduce_sum(predictions * one_hot, axis=-1)
 
                 grads = tape.gradient(class_channel, conv_outputs)
+
+                if grads is None:
+                    raise ValueError("Gradients are None - gradient computation failed")
                 pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
                 conv_outputs = conv_outputs[0]
