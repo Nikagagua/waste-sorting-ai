@@ -259,35 +259,48 @@ def generate_xai_figure(model, test_path, class_names, model_name):
 
         if last_conv_layer:
             try:
-                grad_model = keras.models.Model(
-                    [model.inputs], [last_conv_layer.output, model.output]
-                )
+                img_tensor = tf.convert_to_tensor(np.expand_dims(img_array, 0))
 
                 with tf.GradientTape() as tape:
-                    conv_out, preds = grad_model(np.expand_dims(img_array, 0))
-                    top_idx = tf.argmax(preds[0])
-                    top_class = preds[:, top_idx]
+                    tape.watch(img_tensor)
+                    last_conv_output = last_conv_layer.output
+                    preds = model(img_tensor)
 
-                grads = tape.gradient(top_class, conv_out)
+                    grad_model = keras.models.Model(
+                        model.inputs, [last_conv_output, preds]
+                    )
+                    conv_out, pred_out = grad_model(img_tensor)
+
+                    top_class_idx = tf.argmax(pred_out[0])
+                    top_class_channel = pred_out[:, top_class_idx]
+
+                grads = tape.gradient(top_class_channel, conv_out)
                 pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-                heatmap = conv_out[0] @ pooled_grads[..., tf.newaxis]
+
+                conv_out = conv_out[0]
+                heatmap = conv_out @ pooled_grads[..., tf.newaxis]
                 heatmap = tf.squeeze(heatmap)
-                heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
+                heatmap = tf.maximum(heatmap, 0)
+                heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
                 heatmap = heatmap.numpy()
 
-                heatmap_resized = np.array(
-                    Image.fromarray((heatmap * 255).astype(np.uint8)).resize(img.size)
+                heatmap_resized = np.uint8(255 * heatmap)
+                heatmap_resized = Image.fromarray(heatmap_resized).resize(
+                    img.size, Image.Resampling.BILINEAR
                 )
+                heatmap_resized = np.array(heatmap_resized)
 
                 axes[i, 1].imshow(img)
                 axes[i, 1].imshow(heatmap_resized, cmap="jet", alpha=0.4)
                 axes[i, 1].set_title("Grad-CAM")
                 axes[i, 1].axis("off")
             except Exception as e:
-                axes[i, 1].text(0.5, 0.5, "Error", ha="center", va="center")
+                axes[i, 1].imshow(img)
+                axes[i, 1].set_title("Grad-CAM (unavailable)")
                 axes[i, 1].axis("off")
         else:
-            axes[i, 1].text(0.5, 0.5, "N/A", ha="center", va="center")
+            axes[i, 1].imshow(img)
+            axes[i, 1].set_title("Grad-CAM (unavailable)")
             axes[i, 1].axis("off")
 
         try:
@@ -295,21 +308,22 @@ def generate_xai_figure(model, test_path, class_names, model_name):
 
             explainer = lime_image.LimeImageExplainer()
             explanation = explainer.explain_instance(
-                (img_array * 255).astype(np.uint8),
-                lambda x: model.predict(x / 255.0, verbose=0),
+                img_array.astype(np.float64),
+                lambda x: model.predict(x, verbose=0),
                 top_labels=1,
-                num_samples=300,
+                num_samples=200,
             )
             temp, mask = explanation.get_image_and_mask(
                 np.argmax(pred), positive_only=True, num_features=5, hide_rest=False
             )
 
-            lime_vis = mark_boundaries(temp / 255.0, mask)
+            lime_vis = mark_boundaries(temp, mask)
             axes[i, 2].imshow(lime_vis)
             axes[i, 2].set_title("LIME")
             axes[i, 2].axis("off")
-        except:
-            axes[i, 2].text(0.5, 0.5, "Error", ha="center", va="center")
+        except Exception as e:
+            axes[i, 2].imshow(img)
+            axes[i, 2].set_title("LIME (unavailable)")
             axes[i, 2].axis("off")
 
     plt.tight_layout()
