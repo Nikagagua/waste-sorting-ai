@@ -19,7 +19,7 @@ from tensorflow.keras import layers
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import ResNet50, MobileNetV2
-from tensorflow.keras.applications import EfficientNetV2B0  # Use V2 instead of B0
+from tensorflow.keras.applications import EfficientNetV2B0
 
 from PIL import Image
 from lime import lime_image
@@ -94,11 +94,10 @@ def build_model(arch, num_classes):
     """Build and compile model."""
     base_models = {
         "ResNet50": ResNet50,
-        "EfficientNetB0": EfficientNetB0,
+        "EfficientNetB0": EfficientNetV2B0,
         "MobileNetV2": MobileNetV2,
     }
 
-    # Build base model with error handling for weight loading issues
     try:
         base = base_models[arch](
             include_top=False, weights="imagenet", input_shape=IMG_SIZE + (3,)
@@ -354,11 +353,9 @@ def main():
     print("\n[3/4] Generating Table 2: Model Comparison...")
     comparison_df = generate_comparison_table(results, class_names)
 
-    # Generate Figure 2: Confusion Matrices
     print("\n[4/4] Generating figures...")
     plot_confusion_matrices(results, class_names)
 
-    # Generate Figure 3: XAI (using best model)
     best_model = max(results.items(), key=lambda x: x[1]["accuracy"])
     print(f"\nGenerating XAI figure using best model: {best_model[0]}...")
     generate_xai_figure(
