@@ -259,27 +259,26 @@ def generate_xai_figure(model, test_path, class_names, model_name):
 
         if last_conv_layer:
             try:
-                img_tensor = tf.convert_to_tensor(np.expand_dims(img_array, 0))
+                grad_model = keras.models.Model(
+                    [model.inputs], [last_conv_layer.output, model.output]
+                )
+
+                img_tensor = np.expand_dims(img_array, 0)
 
                 with tf.GradientTape() as tape:
-                    tape.watch(img_tensor)
-                    last_conv_output = last_conv_layer.output
-                    preds = model(img_tensor)
+                    conv_outputs, predictions = grad_model(img_tensor)
+                    pred_index = tf.argmax(predictions[0])
+                    class_channel = predictions[:, pred_index]
 
-                    grad_model = keras.models.Model(
-                        model.inputs, [last_conv_output, preds]
-                    )
-                    conv_out, pred_out = grad_model(img_tensor)
-
-                    top_class_idx = tf.argmax(pred_out[0])
-                    top_class_channel = pred_out[:, top_class_idx]
-
-                grads = tape.gradient(top_class_channel, conv_out)
+                grads = tape.gradient(class_channel, conv_outputs)
                 pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-                conv_out = conv_out[0]
-                heatmap = conv_out @ pooled_grads[..., tf.newaxis]
-                heatmap = tf.squeeze(heatmap)
+                conv_outputs = conv_outputs[0]
+                pooled_grads = pooled_grads[..., tf.newaxis]
+                heatmap = tf.reduce_sum(
+                    tf.multiply(conv_outputs, pooled_grads), axis=-1
+                )
+
                 heatmap = tf.maximum(heatmap, 0)
                 heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
                 heatmap = heatmap.numpy()
