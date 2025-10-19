@@ -1,13 +1,64 @@
+# Python
 __pycache__/
-*.py[oc]
-*.egg-info
-.venv/
-data/
-.DS_Store
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
 
-# LaTeX auxiliary files
-*.aux
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Data (large files)
+data/raw/
+data/processed/
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# Model outputs
+paper_outputs/*.pdf
+!paper_outputs/.gitkeep
+
+# Keep structure
+!paper_outputs/
+
+# Logs
 *.log
-*.out
-*.fls
-*.fdb_latexmk
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db
+
+# Package managers
+uv.lock
+poetry.lock
+Pipfile.lock

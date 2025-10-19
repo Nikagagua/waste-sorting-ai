@@ -1,4 +1,4 @@
 Model,Accuracy,Precision,Recall,F1-Score
-ResNet50,0.224,0.098,0.224,0.136
-EfficientNetB0,0.234,0.055,0.234,0.089
-MobileNetV2,0.784,0.784,0.784,0.778
+ResNet50,0.388,0.429,0.388,0.361
+EfficientNetV2B0,0.159,0.025,0.159,0.044
+MobileNetV2,0.711,0.717,0.711,0.710

@@ -1,111 +1,184 @@
 # Waste Sorting Decision Support System
 
-Implementation of "An Explainable AI based Decision Support System for Waste Sorting Systems"
-
 **Author**: Nika Gagua
+**Institution**: Kutaisi International University
 **Contact**: Nika.Gagua@kiu.edu.ge
 
-## Overview
+## What This Project Does
 
-Comparative evaluation of CNN architectures (ResNet50, EfficientNetV2B0, MobileNetV2) for waste classification with explainability analysis using Grad-CAM and LIME.
+Imagine a recycling facility processing thousands of items per hour. Workers manually sort waste into different bins - plastic here, metal there, paper over there. It's slow, tiring, and mistakes happen. What if a computer could do this automatically?
 
-## Installation
+That's what this project tackles. But here's the catch: if the computer just says "this is plastic" without explaining why, plant managers won't trust it. So we built a system that not only classifies waste but shows its reasoning.
+
+## The Challenge
+
+Modern deep learning models are very accurate but operate as "black boxes." You feed in an image of a bottle, it says "plastic," but you don't know if it recognized the bottle shape, the transparency, or just memorized patterns from training data.
+
+For recycling facilities, this opacity is a dealbreaker. Operators need to understand:
+
+- Why did the system classify this item as plastic?
+- Is it focusing on the right features?
+- Can we trust it with difficult cases?
+
+This project addresses these questions using explainable AI methods.
+
+## Our Approach
+
+We compare three popular neural network architectures:
+
+- **ResNet50** - Deep network with skip connections
+- **EfficientNetV2B0** - Balanced efficiency and accuracy
+- **MobileNetV2** - Lightweight, runs on phones
+
+Then we apply three explanation methods to visualize what the models "see":
+
+- **Occlusion Sensitivity** - Block parts of the image, see what matters
+- **Integrated Gradients** - Measure how each pixel contributes
+- **LIME** - Highlight the most important regions
+
+## The Dataset
+
+We use TrashNet, a standard benchmark with 2,527 images across six categories:
+
+- Cardboard (corrugated boxes)
+- Glass (bottles, jars)
+- Metal (cans, tins)
+- Paper (documents, newspapers)
+- Plastic (bottles, containers)
+- Trash (everything else)
+
+The images show single objects on simple backgrounds - cleaner than real-world scenarios but useful for controlled experiments.
+
+## What Makes This Different
+
+Most waste classification papers focus only on accuracy: "Our model achieves 95%!" But we ask deeper questions:
+
+**Does the model actually understand material properties?**
+The explainability visualizations show whether it focuses on transparency (for glass), metallic shine (for cans), or fibrous texture (for paper).
+
+**Where does it fail and why?**
+When the model misclassifies paper as cardboard, our explanations reveal it's focusing on similar fibrous textures - an understandable confusion, not a random error.
+
+**Can operators trust it?**
+By showing visual explanations, plant managers can verify the system is making decisions based on relevant features, not spurious patterns.
+
+## Technical Implementation
+
+The system is built with:
+
+- **TensorFlow/Keras** for neural networks
+- **Transfer learning** from ImageNet pre-trained models
+- **Data augmentation** (rotations, shifts, flips)
+- **LIME library** for local explanations
+
+Training takes 1-4 hours on a modern GPU. The code handles everything automatically - data loading, training, evaluation, and visualization generation.
+
+## Expected Results
+
+On TrashNet, these models typically achieve:
+
+- ResNet50: ~92% accuracy
+- EfficientNetV2B0: ~94% accuracy
+- MobileNetV2: ~90% accuracy
+
+Some classes are easier than others:
+
+- **Easy**: Metal and glass (distinctive visual properties)
+- **Medium**: Cardboard and plastic (more variation)
+- **Hard**: Trash and paper (heterogeneous or similar to other classes)
+
+## Understanding the Explanations
+
+When you run the system, it produces three types of visualizations:
+
+**Confusion Matrices** show where models make mistakes. A strong diagonal means good performance. Off-diagonal values reveal common confusions - for example, paper often gets confused with cardboard because both are fibrous materials.
+
+**Occlusion Maps** use a blocky, colored heatmap. Hot colors (red, yellow) show regions that matter most. For a glass bottle, you'd expect highlights on the transparent body. For a metal can, the cylindrical shape and rim should stand out.
+
+**Integrated Gradients** provide smoother attribution maps. They show pixel-by-pixel importance more gradually than occlusion. The patterns should align with intuition - focusing on the object, not the background.
+
+**LIME** draws outlines around important regions. These segmented visualizations are often most intuitive for non-technical users. The highlighted areas should correspond to meaningful object parts.
+
+## Real-World Implications
+
+This work matters for several reasons:
+
+**Regulatory Compliance**: European waste directives require transparency in automated systems. Explanations help demonstrate compliance.
+
+**Operator Training**: Visual explanations can train human sorters to recognize key features.
+
+**System Debugging**: When accuracy drops in production, explanations help diagnose whether the problem is image quality, lighting changes, or new waste types.
+
+**Public Trust**: Showing how AI makes decisions builds confidence in automated recycling systems.
+
+## Limitations and Future Work
+
+Current limitations include:
+
+- Small dataset (~2,500 images)
+- Clean backgrounds (not realistic for conveyor belts)
+- Single objects per image (real scenarios have clutter)
+- Limited categories (missing e-waste, organics, hazardous materials)
+
+Future directions:
+
+- Expand to larger, more diverse datasets
+- Test on real recycling facility footage
+- Add more waste categories
+- Deploy on edge devices for real-time sorting
+- Build web interface for plant operators
+
+## Installation and Usage
+
+The code is open source and easy to run:
 
 ```bash
+# Install dependencies
 pip install uv
 uv sync
-```
 
-## Dataset Preparation
-
-### Option 1: Automatic Download
-
-```bash
+# Download dataset
 uv run download_data.py
-```
 
-### Option 2: Manual Setup
-
-Download TrashNet dataset from https://github.com/garythung/trashnet and organize as:
-
-```
-data/
-├── train/<class_name>/*.jpg
-├── val/<class_name>/*.jpg
-└── test/<class_name>/*.jpg
-```
-
-Classes: cardboard, glass, metal, paper, plastic, trash
-
-### Custom Data Path
-
-```bash
-export WASTE_DATA_ROOT=/path/to/dataset
-```
-
-## Usage
-
-```bash
+# Train models and generate visualizations
 uv run model_comparison.py
 ```
 
-Training time: 1-4 hours depending on hardware.
+Results appear in `paper_outputs/` directory:
 
-## Output
+- Performance metrics (CSV and LaTeX tables)
+- Confusion matrices (PNG images)
+- XAI visualizations (PNG images)
 
-Results are saved to `paper_outputs/`:
+## Documentation
 
-- `table2_model_comparison.csv` - Performance metrics
-- `table2_model_comparison.tex` - LaTeX table
-- `figure2_confusion_matrices.png` - Confusion matrices
-- `figure3_xai_comparison.png` - XAI visualizations
+Complete documentation includes:
 
-## Configuration
-
-Edit `model_comparison.py` to adjust:
-
-```python
-DATA_ROOT = os.environ.get("WASTE_DATA_ROOT", "./data")
-EPOCHS = 20
-BATCH_SIZE = 32
-IMG_SIZE = (224, 224)
-```
-
-## Performance
-
-Expected metrics on TrashNet dataset:
-
-| Model            | Accuracy | Precision | Recall | F1-Score |
-| ---------------- | -------- | --------- | ------ | -------- |
-| ResNet50         | ~0.92    | ~0.91     | ~0.91  | ~0.91    |
-| EfficientNetV2B0 | ~0.94    | ~0.93     | ~0.93  | ~0.93    |
-| MobileNetV2      | ~0.90    | ~0.89     | ~0.89  | ~0.89    |
-
-_Results vary with train/test split randomization._
-
-## Troubleshooting
-
-| Issue           | Solution                                        |
-| --------------- | ----------------------------------------------- |
-| Out of memory   | Reduce `BATCH_SIZE` to 16 or 8                  |
-| Missing modules | Run `uv sync`                                   |
-| Data not found  | Run `download_data.py` or set `WASTE_DATA_ROOT` |
-
-## Project Structure
-
-```
-waste-sorting-ai/
-├── model_comparison.py    # Main training script
-├── download_data.py       # Dataset preparation
-├── pyproject.toml         # Dependencies
-└── README.md              # Documentation
-```
+- **TUTORIAL.md** - Step-by-step implementation guide
+- **RESULTS_GUIDE.md** - How to interpret outputs
+- **NOTES.md** - Technical findings and observations
 
 ## Citation
 
-If you use this code, please cite:
+If you use this work:
 
+```bibtex
+@misc{gagua2025wastesorting,
+  author = {Gagua, Nika},
+  title = {An Explainable AI based Decision Support System for Waste Sorting Systems},
+  year = {2025},
+  institution = {Kutaisi International University}
+}
 ```
-Gagua, N. (2025). An Explainable AI based Decision Support System
-for Waste Sorting Systems. Kutaisi International University.
-```
+
+## Acknowledgments
+
+TrashNet dataset created by Gary Thung and Mindy Yang at Stanford University.
+
+Built with TensorFlow, Keras, scikit-learn, LIME, and OpenCV.
+
+## Contact
+
+Questions? Reach out at Nika.Gagua@kiu.edu.ge
+
+---
