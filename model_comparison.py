@@ -1,12 +1,5 @@
 """
 Enhanced Waste Sorting CNN Model with Comprehensive XAI Analysis
-Improvements:
-- Individual plot generation for better visualization
-- Enhanced accuracy tracking and reporting
-- Additional XAI method: Grad-CAM
-- Better data augmentation strategies
-- Class-wise performance metrics
-- Improved model comparison
 """
 
 import os
