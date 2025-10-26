@@ -1117,195 +1117,464 @@ def generate_xai_visualizations_parallel(
 
 
 def plot_training_curves(results: Dict, config: Config):
-    """Plot training curves for all models"""
-    logger.info("Generating training curves...")
+    """Plot individual training curves for each model"""
+    logger.info("Generating individual training curves...")
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
+    # Create individual training curve for each model
     for name, res in results.items():
         history = res["history"]
 
-        axes[0, 0].plot(history["loss"], label=f"{name} (train)", linewidth=2)
-        axes[0, 0].plot(
-            history["val_loss"], label=f"{name} (val)", linestyle="--", linewidth=2
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Loss plot
+        epochs = range(1, len(history["loss"]) + 1)
+        axes[0].plot(
+            epochs,
+            history["loss"],
+            "b-",
+            label="Training Loss",
+            linewidth=2.5,
+            marker="o",
+            markersize=4,
+        )
+        axes[0].plot(
+            epochs,
+            history["val_loss"],
+            "r--",
+            label="Validation Loss",
+            linewidth=2.5,
+            marker="s",
+            markersize=4,
+        )
+        axes[0].set_title(
+            f"{name}\nLoss During Training", fontsize=16, fontweight="bold", pad=20
+        )
+        axes[0].set_xlabel("Training Epoch", fontsize=13)
+        axes[0].set_ylabel("Loss Value (Lower is Better)", fontsize=13)
+        axes[0].legend(fontsize=11, loc="upper right")
+        axes[0].grid(True, alpha=0.3, linestyle="--")
+
+        # Accuracy plot
+        axes[1].plot(
+            epochs,
+            history["accuracy"],
+            "b-",
+            label="Training Accuracy",
+            linewidth=2.5,
+            marker="o",
+            markersize=4,
+        )
+        axes[1].plot(
+            epochs,
+            history["val_accuracy"],
+            "r--",
+            label="Validation Accuracy",
+            linewidth=2.5,
+            marker="s",
+            markersize=4,
+        )
+        axes[1].set_title(
+            f"{name}\nAccuracy During Training", fontsize=16, fontweight="bold", pad=20
+        )
+        axes[1].set_xlabel("Training Epoch", fontsize=13)
+        axes[1].set_ylabel("Accuracy (Higher is Better)", fontsize=13)
+        axes[1].set_ylim([0, 1.05])
+        axes[1].legend(fontsize=11, loc="lower right")
+        axes[1].grid(True, alpha=0.3, linestyle="--")
+
+        # Add final values as text
+        final_train_acc = history["accuracy"][-1]
+        final_val_acc = history["val_accuracy"][-1]
+        axes[1].text(
+            0.02,
+            0.98,
+            f"Final Training: {final_train_acc*100:.2f}%\nFinal Validation: {final_val_acc*100:.2f}%",
+            transform=axes[1].transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
         )
 
-        axes[0, 1].plot(history["accuracy"], label=f"{name} (train)", linewidth=2)
-        axes[0, 1].plot(
-            history["val_accuracy"], label=f"{name} (val)", linestyle="--", linewidth=2
+        plt.tight_layout()
+        safe_name = name.replace("/", "_").replace(" ", "_")
+        plt.savefig(
+            f"{config.output_dir}/training_curves/{safe_name}_training.png",
+            dpi=300,
+            bbox_inches="tight",
         )
+        plt.close()
 
-    axes[0, 0].set_title("Model Loss", fontsize=14, fontweight="bold")
-    axes[0, 0].set_xlabel("Epoch", fontsize=12)
-    axes[0, 0].set_ylabel("Loss", fontsize=12)
-    axes[0, 0].legend(fontsize=10)
-    axes[0, 0].grid(True, alpha=0.3)
-
-    axes[0, 1].set_title("Model Accuracy", fontsize=14, fontweight="bold")
-    axes[0, 1].set_xlabel("Epoch", fontsize=12)
-    axes[0, 1].set_ylabel("Accuracy", fontsize=12)
-    axes[0, 1].legend(fontsize=10)
-    axes[0, 1].grid(True, alpha=0.3)
-
-    models = list(results.keys())
-    accuracies = [results[m]["accuracy"] for m in models]
-    f1_scores = [results[m]["macro_avg"]["f1-score"] for m in models]
-
-    colors = plt.cm.Set3(np.linspace(0, 1, len(models)))
-
-    bars1 = axes[1, 0].bar(
-        models, accuracies, color=colors, edgecolor="black", linewidth=1.5
-    )
-    axes[1, 0].set_title("Final Test Accuracy", fontsize=14, fontweight="bold")
-    axes[1, 0].set_ylabel("Accuracy", fontsize=12)
-    axes[1, 0].set_ylim([max(0, min(accuracies) - 0.1), 1])
-    axes[1, 0].grid(True, alpha=0.3, axis="y")
-
-    for i, (bar, v) in enumerate(zip(bars1, accuracies)):
-        axes[1, 0].text(
-            bar.get_x() + bar.get_width() / 2,
-            v + 0.01,
-            f"{v:.4f}\n({v * 100:.2f}%)",
-            ha="center",
-            fontweight="bold",
-            fontsize=9,
-        )
-
-    bars2 = axes[1, 1].bar(
-        models, f1_scores, color=colors, edgecolor="black", linewidth=1.5
-    )
-    axes[1, 1].set_title("Final Macro F1-Score", fontsize=14, fontweight="bold")
-    axes[1, 1].set_ylabel("F1-Score", fontsize=12)
-    axes[1, 1].set_ylim([max(0, min(f1_scores) - 0.1), 1])
-    axes[1, 1].grid(True, alpha=0.3, axis="y")
-
-    for i, (bar, v) in enumerate(zip(bars2, f1_scores)):
-        axes[1, 1].text(
-            bar.get_x() + bar.get_width() / 2,
-            v + 0.01,
-            f"{v:.4f}",
-            ha="center",
-            fontweight="bold",
-            fontsize=9,
-        )
-
-    plt.tight_layout()
-    plt.savefig(
-        f"{config.output_dir}/training_curves/all_models_comparison.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    plt.close()
-
-    logger.info("✓ Training curves saved")
+    logger.info("✓ Individual training curves saved")
 
 
 def plot_confusion_matrices(results: Dict, class_names: List[str], config: Config):
-    """Plot confusion matrices for all models"""
-    logger.info("Generating confusion matrices...")
+    """Plot individual confusion matrices for each model"""
+    logger.info("Generating individual confusion matrices...")
 
-    n_models = len(results)
-    cols = 2
-    rows = (n_models + 1) // 2
+    for name, res in results.items():
+        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
 
-    fig, axes = plt.subplots(rows, cols, figsize=(14 * cols, 12 * rows))
-    if n_models == 1:
-        axes = [axes]
-    else:
-        axes = axes.flatten()
-
-    for idx, (name, res) in enumerate(results.items()):
         cm = res["cm"]
         cm_normalized = cm.astype("float") / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
 
+        # Create heatmap
         sns.heatmap(
             cm_normalized,
             annot=True,
-            fmt=".2%",
-            cmap="Blues",
+            fmt=".1%",
+            cmap="YlGnBu",
             xticklabels=class_names,
             yticklabels=class_names,
-            ax=axes[idx],
-            cbar_kws={"label": "Normalized Proportion"},
+            ax=ax,
+            cbar_kws={"label": "Percentage of Predictions"},
             vmin=0,
             vmax=1,
+            linewidths=0.5,
+            linecolor="gray",
         )
 
-        axes[idx].set_title(
-            f"{name}\nAccuracy: {res['accuracy']:.4f} ({res['accuracy'] * 100:.2f}%)",
-            fontsize=14,
+        # Title with explanation
+        ax.set_title(
+            f"{name} - Prediction Accuracy Matrix\n"
+            f"Overall Accuracy: {res['accuracy'] * 100:.2f}%\n"
+            f"(Darker colors = More predictions)",
+            fontsize=16,
             fontweight="bold",
+            pad=20,
         )
-        axes[idx].set_ylabel("True Label", fontsize=12)
-        axes[idx].set_xlabel("Predicted Label", fontsize=12)
+        ax.set_ylabel("Actual Waste Type", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Predicted Waste Type", fontsize=13, fontweight="bold")
 
-    for idx in range(n_models, len(axes)):
-        axes[idx].axis("off")
+        # Add explanation text
+        explanation = "How to read: Each row shows how items of one type were classified.\nDiagonal (top-left to bottom-right) shows correct predictions."
+        plt.figtext(
+            0.5, 0.01, explanation, ha="center", fontsize=10, style="italic", wrap=True
+        )
 
-    plt.tight_layout()
-    plt.savefig(
-        f"{config.output_dir}/confusion_matrices/all_confusion_matrices.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    plt.close()
+        plt.tight_layout(rect=[0, 0.03, 1, 1])
+        safe_name = name.replace("/", "_").replace(" ", "_")
+        plt.savefig(
+            f"{config.output_dir}/confusion_matrices/{safe_name}_confusion_matrix.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close()
 
-    logger.info("✓ Confusion matrices saved")
+    logger.info("✓ Individual confusion matrices saved")
 
 
 def plot_per_class_metrics(results: Dict, class_names: List[str], config: Config):
-    """Plot per-class metrics comparison"""
+    """Plot individual per-class metrics for each model"""
     logger.info("Generating per-class metrics...")
 
-    metrics = ["precision", "recall", "f1"]
-    fig, axes = plt.subplots(1, 3, figsize=(22, 6))
+    # Create individual charts for each model
+    for name, res in results.items():
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
 
-    x = np.arange(len(class_names))
-    width = 0.8 / len(results)
+        x = np.arange(len(class_names))
+        width = 0.25
 
-    colors = plt.cm.Set2(np.linspace(0, 1, len(results)))
+        precision = res["per_class_precision"]
+        recall = res["per_class_recall"]
+        f1 = res["per_class_f1"]
 
-    for metric_idx, metric in enumerate(metrics):
-        for model_idx, (name, res) in enumerate(results.items()):
-            offset = width * model_idx - width * len(results) / 2
-
-            if metric == "precision":
-                values = res["per_class_precision"]
-            elif metric == "recall":
-                values = res["per_class_recall"]
-            else:
-                values = res["per_class_f1"]
-
-            axes[metric_idx].bar(
-                x + offset,
-                values,
-                width,
-                label=name,
-                color=colors[model_idx],
-                edgecolor="black",
-                linewidth=0.8,
-            )
-
-        axes[metric_idx].set_title(
-            f"Per-Class {metric.capitalize()}", fontsize=14, fontweight="bold"
+        # Create grouped bars
+        bars1 = ax.bar(
+            x - width,
+            precision,
+            width,
+            label="Precision (Correctness)",
+            color="#3498db",
+            edgecolor="black",
+            linewidth=1.2,
         )
-        axes[metric_idx].set_ylabel(metric.capitalize(), fontsize=12)
-        axes[metric_idx].set_xlabel("Class", fontsize=12)
-        axes[metric_idx].set_xticks(x)
-        axes[metric_idx].set_xticklabels(class_names, rotation=45, ha="right")
-        axes[metric_idx].legend(fontsize=10)
-        axes[metric_idx].grid(True, alpha=0.3, axis="y")
-        axes[metric_idx].set_ylim([0, 1.05])
+        bars2 = ax.bar(
+            x,
+            recall,
+            width,
+            label="Recall (Completeness)",
+            color="#2ecc71",
+            edgecolor="black",
+            linewidth=1.2,
+        )
+        bars3 = ax.bar(
+            x + width,
+            f1,
+            width,
+            label="F1-Score (Overall)",
+            color="#e74c3c",
+            edgecolor="black",
+            linewidth=1.2,
+        )
+
+        # Add value labels on bars
+        def add_value_labels(bars):
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height,
+                    f"{height*100:.1f}%",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                )
+
+        add_value_labels(bars1)
+        add_value_labels(bars2)
+        add_value_labels(bars3)
+
+        ax.set_title(
+            f"{name}\nPerformance by Waste Type", fontsize=16, fontweight="bold", pad=20
+        )
+        ax.set_ylabel("Score (Higher is Better)", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Waste Type", fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=11)
+        ax.legend(fontsize=12, loc="lower right")
+        ax.set_ylim([0, 1.15])
+        ax.grid(True, alpha=0.3, axis="y", linestyle="--")
+        ax.axhline(y=0.8, color="gray", linestyle=":", alpha=0.5, label="80% threshold")
+
+        plt.tight_layout()
+        safe_name = name.replace("/", "_").replace(" ", "_")
+        plt.savefig(
+            f"{config.output_dir}/per_class_metrics/{safe_name}_per_class.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close()
+
+    logger.info("✓ Per-class metrics saved")
+
+
+def plot_model_comparison_overview(results: Dict, config: Config):
+    """Create easy-to-understand comparison charts for all models"""
+    logger.info("Generating model comparison overview...")
+
+    # 1. Overall Accuracy Comparison
+    fig, ax = plt.subplots(1, 1, figsize=(12, 7))
+
+    models = list(results.keys())
+    accuracies = [results[m]["accuracy"] * 100 for m in models]
+
+    # Sort by accuracy
+    sorted_indices = np.argsort(accuracies)[::-1]
+    models_sorted = [models[i] for i in sorted_indices]
+    accuracies_sorted = [accuracies[i] for i in sorted_indices]
+
+    # Create color gradient (best = green, worst = yellow)
+    colors = plt.cm.RdYlGn(np.linspace(0.4, 0.9, len(models)))
+
+    bars = ax.barh(
+        models_sorted, accuracies_sorted, color=colors, edgecolor="black", linewidth=2
+    )
+
+    # Add percentage labels
+    for i, (bar, acc) in enumerate(zip(bars, accuracies_sorted)):
+        ax.text(
+            acc + 1,
+            bar.get_y() + bar.get_height() / 2,
+            f"{acc:.2f}%",
+            va="center",
+            fontweight="bold",
+            fontsize=12,
+        )
+
+        # Add rank medal
+        rank = i + 1
+        medal = (
+            "🥇"
+            if rank == 1
+            else "🥈" if rank == 2 else "🥉" if rank == 3 else f"#{rank}"
+        )
+        ax.text(2, bar.get_y() + bar.get_height() / 2, medal, va="center", fontsize=14)
+
+    ax.set_xlabel("Accuracy Percentage", fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Model Accuracy Ranking\n(Which model makes the most correct predictions?)",
+        fontsize=16,
+        fontweight="bold",
+        pad=20,
+    )
+    ax.set_xlim([0, 105])
+    ax.grid(True, alpha=0.3, axis="x", linestyle="--")
 
     plt.tight_layout()
     plt.savefig(
-        f"{config.output_dir}/per_class_metrics/per_class_comparison.png",
+        f"{config.output_dir}/model_comparison_accuracy.png",
         dpi=300,
         bbox_inches="tight",
     )
     plt.close()
 
-    logger.info("✓ Per-class metrics saved")
+    # 2. Multi-metric Comparison
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+
+    metrics_names = ["Accuracy", "Precision", "Recall", "F1-Score"]
+    x = np.arange(len(models))
+    width = 0.2
+
+    for i, model in enumerate(models):
+        res = results[model]
+        values = [
+            res["accuracy"] * 100,
+            res["weighted_avg"]["precision"] * 100,
+            res["weighted_avg"]["recall"] * 100,
+            res["weighted_avg"]["f1-score"] * 100,
+        ]
+
+        positions = x + (i - len(models) / 2) * width + width / 2
+        bars = ax.bar(
+            positions, values, width, label=model, edgecolor="black", linewidth=1
+        )
+
+        # Add value labels
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height,
+                f"{val:.1f}%",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+            )
+
+    ax.set_ylabel("Score Percentage", fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Complete Model Performance Comparison\n(All Key Metrics)",
+        fontsize=16,
+        fontweight="bold",
+        pad=20,
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_names, fontsize=12, fontweight="bold")
+    ax.legend(fontsize=11, loc="lower right")
+    ax.set_ylim([0, 110])
+    ax.grid(True, alpha=0.3, axis="y", linestyle="--")
+    ax.axhline(
+        y=80,
+        color="red",
+        linestyle=":",
+        alpha=0.5,
+        linewidth=2,
+        label="80% Good Performance",
+    )
+    ax.axhline(
+        y=90,
+        color="green",
+        linestyle=":",
+        alpha=0.5,
+        linewidth=2,
+        label="90% Excellent Performance",
+    )
+
+    plt.tight_layout()
+    plt.savefig(
+        f"{config.output_dir}/model_comparison_all_metrics.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+    # 3. Performance Summary Cards
+    fig = plt.figure(figsize=(16, 10))
+
+    for idx, (name, res) in enumerate(results.items()):
+        ax = plt.subplot(2, 2, idx + 1)
+        ax.axis("off")
+
+        # Create a summary card
+        summary_text = f"""
+        {name}
+        {'=' * 50}
+
+        OVERALL PERFORMANCE
+        ✓ Accuracy: {res['accuracy']*100:.2f}%
+        ✓ Precision: {res['weighted_avg']['precision']*100:.2f}%
+        ✓ Recall: {res['weighted_avg']['recall']*100:.2f}%
+        ✓ F1-Score: {res['weighted_avg']['f1-score']*100:.2f}%
+
+        WHAT THIS MEANS:
+        • Out of 100 items, {int(res['accuracy']*100)} are correctly sorted
+        • When it says "recyclable", it's right {res['weighted_avg']['precision']*100:.1f}% of the time
+        • It finds {res['weighted_avg']['recall']*100:.1f}% of all recyclable items
+
+        TRAINING STABILITY
+        Final Training Accuracy: {res['history']['accuracy'][-1]*100:.2f}%
+        Final Validation Accuracy: {res['history']['val_accuracy'][-1]*100:.2f}%
+        """
+
+        # Determine performance level
+        acc = res["accuracy"]
+        if acc >= 0.95:
+            grade = "EXCELLENT ⭐⭐⭐⭐⭐"
+            color = "#27ae60"
+        elif acc >= 0.90:
+            grade = "VERY GOOD ⭐⭐⭐⭐"
+            color = "#2ecc71"
+        elif acc >= 0.85:
+            grade = "GOOD ⭐⭐⭐"
+            color = "#f39c12"
+        elif acc >= 0.80:
+            grade = "ACCEPTABLE ⭐⭐"
+            color = "#e67e22"
+        else:
+            grade = "NEEDS IMPROVEMENT ⭐"
+            color = "#e74c3c"
+
+        ax.text(
+            0.5,
+            0.95,
+            grade,
+            ha="center",
+            va="top",
+            fontsize=14,
+            fontweight="bold",
+            transform=ax.transAxes,
+            color=color,
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor=color,
+                alpha=0.3,
+                edgecolor=color,
+                linewidth=3,
+            ),
+        )
+
+        ax.text(
+            0.05,
+            0.85,
+            summary_text,
+            ha="left",
+            va="top",
+            fontsize=10,
+            family="monospace",
+            transform=ax.transAxes,
+            bbox=dict(
+                boxstyle="round,pad=1",
+                facecolor="lightgray",
+                alpha=0.2,
+                edgecolor="black",
+                linewidth=1,
+            ),
+        )
+
+    plt.suptitle(
+        "Model Performance Summary Cards\n(Quick Overview of Each Model)",
+        fontsize=18,
+        fontweight="bold",
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(
+        f"{config.output_dir}/model_summary_cards.png", dpi=300, bbox_inches="tight"
+    )
+    plt.close()
+
+    logger.info("✓ Model comparison overview saved")
 
 
 # ============================================================================
@@ -1351,7 +1620,7 @@ def save_comprehensive_report(results: Dict, class_names: List[str], config: Con
         f.write("-" * 100 + "\n")
 
         sorted_results = sorted(
-            results.items(), key=lambda x: x["accuracy"], reverse=True
+            results.items(), key=lambda x: x[1]["accuracy"], reverse=True
         )
 
         for rank, (name, res) in enumerate(sorted_results, 1):
@@ -1464,32 +1733,35 @@ def main():
         keras.mixed_precision.set_global_policy("mixed_float16")
         logger.info("✓ Mixed precision training enabled")
 
-    logger.info("\n[1/7] Loading data with optimized pipeline...")
+    logger.info("\n[1/8] Loading data with optimized pipeline...")
     data_loader = OptimizedDataLoader(config)
     train_ds, val_ds, test_ds, class_names, class_weights = data_loader.load_data()
     logger.info(f"✓ Classes: {class_names}")
 
-    logger.info("\n[2/7] Training models...")
+    logger.info("\n[2/8] Training models...")
     trainer = SequentialTrainer(config)
     results = trainer.train_all_models(
         train_ds, val_ds, test_ds, class_names, class_weights
     )
 
-    logger.info("\n[3/7] Generating training curves...")
+    logger.info("\n[3/8] Generating training curves...")
     plot_training_curves(results, config)
 
-    logger.info("\n[4/7] Generating confusion matrices...")
+    logger.info("\n[4/8] Generating confusion matrices...")
     plot_confusion_matrices(results, class_names, config)
 
-    logger.info("\n[5/7] Generating per-class metrics...")
+    logger.info("\n[5/8] Generating per-class metrics...")
     plot_per_class_metrics(results, class_names, config)
 
-    logger.info("\n[6/7] Saving comprehensive report...")
+    logger.info("\n[6/8] Generating model comparison overview...")
+    plot_model_comparison_overview(results, config)
+
+    logger.info("\n[7/8] Saving comprehensive report...")
     save_comprehensive_report(results, class_names, config)
 
-    best_model_name = max(results.items(), key=lambda x: x["accuracy"])
+    best_model_name = max(results.items(), key=lambda x: x[1]["accuracy"])[0]
     logger.info(
-        f"\n[7/7] Generating XAI visualizations for best model: {best_model_name}"
+        f"\n[8/8] Generating XAI visualizations for best model: {best_model_name}"
     )
 
     test_dir = os.path.join(config.data_root, "test")

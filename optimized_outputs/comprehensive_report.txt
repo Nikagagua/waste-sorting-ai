@@ -1,0 +1,24 @@
+====================================================================================================
+IMPROVED WASTE SORTING SYSTEM - COMPREHENSIVE REPORT
+Generated: 2025-10-26 22:49:31
+====================================================================================================
+
+CONFIGURATION:
+  Data Root: ./data
+  Image Size: (224, 224)
+  Batch Size: 32
+  Total Epochs: 50
+  Phase 1 Epochs: 15
+  Phase 2 Epochs: 35
+  Learning Rate (Phase 1): 0.001
+  Learning Rate (Phase 2): 1e-05
+  Dropout Rate: 0.3
+  Use Focal Loss: False
+  Use Class Weights: True
+  Use TTA: False
+  Mixed Precision: False
+  Classes: cardboard, glass, metal, paper, plastic, trash
+
+MODEL COMPARISON:
+Model                     Accuracy     Precision    Recall       F1-Score    
+----------------------------------------------------------------------------------------------------
