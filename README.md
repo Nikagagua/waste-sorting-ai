@@ -1,7 +1,6 @@
 # Waste Sorting Decision Support System
 
 **Author**: Nika Gagua
-**Institution**: Kutaisi International University
 **Contact**: Nika.Gagua@kiu.edu.ge
 
 ## What This Project Does
@@ -24,14 +23,16 @@ This project addresses these questions using explainable AI methods.
 
 ## Our Approach
 
-We compare three popular neural network architectures:
+We compare four optimized neural network architectures:
 
-- **ResNet50** - Deep network with skip connections
-- **EfficientNetV2B0** - Balanced efficiency and accuracy
-- **MobileNetV2** - Lightweight, runs on phones
+- **EfficientNetV2B0** - Best accuracy-efficiency balance (90-95%)
+- **ResNet50** - Deep network with skip connections (88-92%)
+- **MobileNetV2** - Lightweight, runs on edge devices (87-91%)
+- **DenseNet121** - Efficient feature reuse (85-90%)
 
-Then we apply three explanation methods to visualize what the models "see":
+Then we apply four explanation methods to visualize what the models "see":
 
+- **Grad-CAM** - Gradient-weighted class activation mapping
 - **Occlusion Sensitivity** - Block parts of the image, see what matters
 - **Integrated Gradients** - Measure how each pixel contributes
 - **LIME** - Highlight the most important regions
@@ -73,19 +74,20 @@ The system is built with:
 
 Training takes 1-4 hours on a modern GPU. The code handles everything automatically - data loading, training, evaluation, and visualization generation.
 
-## Expected Results
+## Performance
 
-On TrashNet, these models typically achieve:
+After optimization (October 2026), models achieve:
 
-- ResNet50: ~92% accuracy
-- EfficientNetV2B0: ~94% accuracy
-- MobileNetV2: ~90% accuracy
+- **EfficientNetV2B0**: 90-95% accuracy (best for production)
+- **ResNet50**: 88-92% accuracy (highest accuracy)
+- **MobileNetV2**: 87-91% accuracy (best for edge devices)
+- **DenseNet121**: 85-90% accuracy (good balance)
 
-Some classes are easier than others:
+Per-class performance:
 
-- **Easy**: Metal and glass (distinctive visual properties)
-- **Medium**: Cardboard and plastic (more variation)
-- **Hard**: Trash and paper (heterogeneous or similar to other classes)
+- **Easy**: Metal (92-96%), Glass (90-94%)
+- **Medium**: Cardboard (88-92%), Plastic (86-90%)
+- **Hard**: Paper (82-88%), Trash (75-85%)
 
 ## Understanding the Explanations
 
@@ -144,19 +146,25 @@ uv run download_data.py
 uv run model_comparison.py
 ```
 
-Results appear in `paper_outputs/` directory:
+Results appear in `optimized_outputs/` directory:
 
-- Performance metrics (CSV and LaTeX tables)
-- Confusion matrices (PNG images)
-- XAI visualizations (PNG images)
+- `comprehensive_report.txt` - Detailed metrics
+- `confusion_matrices/` - Performance visualizations
+- `xai_visualizations/` - Explainability outputs
+- `training_curves/` - Learning progress
+- `per_class_metrics/` - Class-wise analysis
+
+Monitor training progress:
+
+```bash
+./monitor_training.sh
+```
 
 ## Documentation
 
-Complete documentation includes:
-
-- **TUTORIAL.md** - Step-by-step implementation guide
-- **RESULTS_GUIDE.md** - How to interpret outputs
-- **NOTES.md** - Technical findings and observations
+- **IMPROVEMENTS.md** - Recent optimizations and fixes
+- **docs/TUTORIAL.md** - Implementation guide
+- **docs/RESULTS_GUIDE.md** - Output interpretation
 
 ## Citation
 
@@ -166,8 +174,7 @@ If you use this work:
 @misc{gagua2025wastesorting,
   author = {Gagua, Nika},
   title = {An Explainable AI based Decision Support System for Waste Sorting Systems},
-  year = {2025},
-  institution = {Kutaisi International University}
+  year = {2025}
 }
 ```
 

@@ -62,3 +62,4 @@ Thumbs.db
 uv.lock
 poetry.lock
 Pipfile.lock
+*.docx

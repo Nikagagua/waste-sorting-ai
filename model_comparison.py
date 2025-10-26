@@ -1,225 +1,733 @@
-"""
-Enhanced Waste Sorting CNN Model with Comprehensive XAI Analysis
-"""
-
 import os
-import numpy as np
-import pandas as pd
-import seaborn as sns
+import gc
+import json
+import time
+import logging
 from pathlib import Path
-import matplotlib.pyplot as plt
+import multiprocessing as mp
 from datetime import datetime
+from typing import Dict, List, Tuple
+from dataclasses import dataclass, field
+
+import numpy as np
+import seaborn as sns
+from PIL import Image
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Model
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.callbacks import (
+    EarlyStopping,
+    ReduceLROnPlateau,
+    ModelCheckpoint,
+    TensorBoard,
+    CSVLogger,
+    Callback,
+)
 from tensorflow.keras.applications import (
     ResNet50,
     EfficientNetV2B0,
+    EfficientNetV2B3,
     MobileNetV2,
     DenseNet121,
+    ConvNeXtBase,
 )
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
-from PIL import Image
-from lime import lime_image
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
-    accuracy_score,
     precision_recall_fscore_support,
 )
-from sklearn.utils.class_weight import compute_class_weight
-from skimage.segmentation import mark_boundaries
+
+from lime import lime_image
+import warnings
 import cv2
-import json
 
 
-# Configuration
-DATA_ROOT = os.environ.get("WASTE_DATA_ROOT", "./data")
-IMG_SIZE = (224, 224)
-BATCH_SIZE = 32
-EPOCHS = 50
-OUTPUT_DIR = "enhanced_paper_outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Create subdirectories for organization
-os.makedirs(f"{OUTPUT_DIR}/confusion_matrices", exist_ok=True)
-os.makedirs(f"{OUTPUT_DIR}/training_curves", exist_ok=True)
-os.makedirs(f"{OUTPUT_DIR}/xai_visualizations", exist_ok=True)
-os.makedirs(f"{OUTPUT_DIR}/per_class_metrics", exist_ok=True)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-def load_data():
-    """Load train, val, test generators with enhanced augmentation."""
-    if not os.path.exists(DATA_ROOT):
-        raise FileNotFoundError(f"\nData directory not found: {DATA_ROOT}")
+# ============================================================================
+# GPU CONFIGURATION
+# ============================================================================
 
-    for split in ["train", "val", "test"]:
-        split_path = os.path.join(DATA_ROOT, split)
-        if not os.path.exists(split_path):
-            raise FileNotFoundError(f"\nMissing {split} directory: {split_path}")
+gpus = tf.config.experimental.list_physical_devices("GPU")
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"✓ Found {len(gpus)} GPU(s)")
+    except RuntimeError as e:
+        print(f"GPU configuration error: {e}")
 
-    # Enhanced augmentation based on state-of-the-art approaches
-    train_datagen = ImageDataGenerator(
-        rescale=1.0 / 255,
-        rotation_range=25,  # Increased from 15
-        width_shift_range=0.1,  # Increased from 0.05
-        height_shift_range=0.1,
-        horizontal_flip=True,
-        vertical_flip=True,  # Added vertical flip
-        zoom_range=0.1,  # Added zoom
-        brightness_range=[0.8, 1.2],  # Added brightness variation
-        fill_mode="nearest",
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(f"training_{datetime.now():%Y%m%d_%H%M%S}.log"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+
+@dataclass
+class Config:
+    """Central configuration with validation"""
+
+    data_root: str = os.environ.get("WASTE_DATA_ROOT", "./data")
+    img_size: Tuple[int, int] = (224, 224)
+    batch_size: int = 32
+    epochs: int = 50
+    learning_rate: float = 1e-3
+    fine_tune_lr: float = 1e-5
+    dropout_rate: float = 0.3
+    output_dir: str = "optimized_outputs"
+
+    num_workers: int = min(mp.cpu_count(), 8)
+
+    models_to_train: List[str] = field(
+        default_factory=lambda: [
+            "ResNet50",
+            "EfficientNetV2B0",
+            "DenseNet121",
+            "MobileNetV2",
+        ]
     )
-    val_datagen = ImageDataGenerator(rescale=1.0 / 255)
 
-    train = train_datagen.flow_from_directory(
-        os.path.join(DATA_ROOT, "train"),
-        target_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-        class_mode="categorical",
-        shuffle=True,
+    xai_samples_per_class: int = 3
+    xai_methods: List[str] = field(
+        default_factory=lambda: [
+            "grad_cam",
+            "lime",
+            "occlusion",
+            "integrated_gradients",
+        ]
     )
-    val = val_datagen.flow_from_directory(
-        os.path.join(DATA_ROOT, "val"),
-        target_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-        class_mode="categorical",
-        shuffle=False,
-    )
-    test = val_datagen.flow_from_directory(
-        os.path.join(DATA_ROOT, "test"),
-        target_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-        class_mode="categorical",
-        shuffle=False,
-    )
-    return train, val, test, list(train.class_indices.keys())
+
+    use_mixed_precision: bool = False
+    use_class_weights: bool = True
+    use_focal_loss: bool = False
+    focal_loss_gamma: float = 2.0
+    focal_loss_alpha: float = 0.25
+
+    use_tta: bool = False
+    tta_steps: int = 5
+
+    warmup_epochs: int = 3
+    gradient_clip_value: float = 1.0
+
+    # Training phases
+    phase1_epochs: int = 15
+    fine_tune_from_layer_percent: float = 0.8  # Freeze 80% of base layers
+
+    # Occlusion settings
+    occlusion_size: int = 30
+    occlusion_stride: int = 15
+    occlusion_batch_size: int = 32
+
+    def __post_init__(self):
+        """Validate configuration and create directories"""
+        # Validate data directory exists
+        if not os.path.exists(self.data_root):
+            raise FileNotFoundError(
+                f"Data directory not found: {self.data_root}\n"
+                f"Please set WASTE_DATA_ROOT environment variable or place data in ./data/\n"
+                f"Expected structure:\n"
+                f"  {self.data_root}/\n"
+                f"    ├── train/class_name/\n"
+                f"    ├── val/class_name/\n"
+                f"    └── test/class_name/"
+            )
+
+        # Check for required subdirectories
+        for split in ["train", "val", "test"]:
+            split_dir = os.path.join(self.data_root, split)
+            if not os.path.exists(split_dir):
+                raise FileNotFoundError(
+                    f"Missing required directory: {split_dir}\n"
+                    f"Expected structure: {self.data_root}/{{train,val,test}}/class_name/"
+                )
+
+        # Create output directories
+        os.makedirs(self.output_dir, exist_ok=True)
+        for subdir in [
+            "models",
+            "confusion_matrices",
+            "training_curves",
+            "xai_visualizations",
+            "per_class_metrics",
+            "logs",
+            "checkpoints",
+        ]:
+            os.makedirs(f"{self.output_dir}/{subdir}", exist_ok=True)
+
+        logger.info("✓ Configuration validated")
+        logger.info(f"  Data root: {self.data_root}")
+        logger.info(f"  Output dir: {self.output_dir}")
+        logger.info(f"  Models to train: {', '.join(self.models_to_train)}")
 
 
-def build_model(arch, num_classes, use_dropout=True, dropout_rate=0.3):
-    """Build and compile model with improved architecture."""
-    base_models = {
+config = Config()
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+
+def set_seed(seed: int = 42):
+    """Ensure reproducibility"""
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["TF_DETERMINISTIC_OPS"] = "1"
+    logger.info(f"✓ Random seed set to {seed}")
+
+
+def focal_loss(gamma=2.0, alpha=0.25):
+    """Focal loss for handling class imbalance"""
+
+    def focal_loss_fixed(y_true, y_pred):
+        epsilon = keras.backend.epsilon()
+        y_pred = keras.backend.clip(y_pred, epsilon, 1.0 - epsilon)
+        cross_entropy = -y_true * keras.backend.log(y_pred)
+        weight = alpha * y_true * keras.backend.pow((1 - y_pred), gamma)
+        loss = weight * cross_entropy
+        return keras.backend.sum(loss, axis=-1)
+
+    return focal_loss_fixed
+
+
+# ============================================================================
+# CALLBACKS
+# ============================================================================
+
+
+class WarmUpLearningRate(Callback):
+    """Learning rate warmup callback"""
+
+    def __init__(self, warmup_epochs, initial_lr, target_lr, verbose=0):
+        super().__init__()
+        self.warmup_epochs = warmup_epochs
+        self.initial_lr = initial_lr
+        self.target_lr = target_lr
+        self.verbose = verbose
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch < self.warmup_epochs:
+            lr = self.initial_lr + (self.target_lr - self.initial_lr) * (
+                epoch / self.warmup_epochs
+            )
+            self.model.optimizer.learning_rate.assign(lr)
+            if self.verbose:
+                logger.info(f"Epoch {epoch + 1}: Warmup LR = {lr:.6f}")
+
+
+class ProgressCallback(Callback):
+    """Custom progress callback with epoch timing"""
+
+    def __init__(self, model_name):
+        super().__init__()
+        self.model_name = model_name
+        self.epoch_start_time = None
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start_time = time.time()
+        logger.info(f"\n{self.model_name} - Epoch {epoch + 1}")
+
+    def on_epoch_end(self, epoch, logs=None):
+        duration = time.time() - self.epoch_start_time
+        logger.info(
+            f"{self.model_name} - Epoch {epoch + 1} completed in {duration:.1f}s - "
+            f"loss: {logs.get('loss', 0):.4f} - "
+            f"accuracy: {logs.get('accuracy', 0):.4f} - "
+            f"val_loss: {logs.get('val_loss', 0):.4f} - "
+            f"val_accuracy: {logs.get('val_accuracy', 0):.4f}"
+        )
+
+
+# ============================================================================
+# DATA LOADER
+# ============================================================================
+
+
+class OptimizedDataLoader:
+    """Optimized data loading with tf.data pipeline"""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.AUTOTUNE = tf.data.AUTOTUNE
+
+    def create_augmentation_layer(self) -> keras.Sequential:
+        """Moderate augmentation for stability"""
+        return keras.Sequential(
+            [
+                layers.RandomFlip("horizontal"),
+                layers.RandomRotation(0.15),
+                layers.RandomZoom(0.15),
+                layers.RandomContrast(0.15),
+                layers.RandomBrightness(0.15),
+            ],
+            name="augmentation",
+        )
+
+    def load_data(self) -> Tuple:
+        """Load data with optimized pipeline"""
+        logger.info("Loading data with optimized pipeline...")
+
+        train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            os.path.join(self.config.data_root, "train"),
+            image_size=self.config.img_size,
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            seed=42,
+        )
+
+        val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            os.path.join(self.config.data_root, "val"),
+            image_size=self.config.img_size,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+        )
+
+        test_ds = tf.keras.preprocessing.image_dataset_from_directory(
+            os.path.join(self.config.data_root, "test"),
+            image_size=self.config.img_size,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+        )
+
+        class_names = train_ds.class_names
+        logger.info(f"✓ Classes found: {class_names}")
+
+        normalization_layer = layers.Rescaling(1.0 / 255)
+        augmentation = self.create_augmentation_layer()
+
+        train_ds = train_ds.map(
+            lambda x, y: (normalization_layer(x), y), num_parallel_calls=self.AUTOTUNE
+        ).cache()  # Cache normalized data
+
+        train_ds = train_ds.map(
+            lambda x, y: (augmentation(x, training=True), y),
+            num_parallel_calls=self.AUTOTUNE,
+        ).prefetch(buffer_size=self.AUTOTUNE)
+
+        val_ds = (
+            val_ds.map(
+                lambda x, y: (normalization_layer(x), y),
+                num_parallel_calls=self.AUTOTUNE,
+            )
+            .cache()
+            .prefetch(buffer_size=self.AUTOTUNE)
+        )
+
+        test_ds = (
+            test_ds.map(
+                lambda x, y: (normalization_layer(x), y),
+                num_parallel_calls=self.AUTOTUNE,
+            )
+            .cache()
+            .prefetch(buffer_size=self.AUTOTUNE)
+        )
+
+        logger.info("✓ Data pipeline optimized with caching and prefetching")
+
+        class_weights = None
+        if self.config.use_class_weights:
+            train_dir = os.path.join(self.config.data_root, "train")
+            class_counts = {}
+
+            for class_idx, class_name in enumerate(class_names):
+                class_dir = os.path.join(train_dir, class_name)
+                count = len(
+                    [
+                        f
+                        for f in os.listdir(class_dir)
+                        if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    ]
+                )
+                class_counts[class_idx] = count
+
+            total = sum(class_counts.values())
+            class_weights = {
+                i: total / (len(class_counts) * count)
+                for i, count in class_counts.items()
+            }
+
+            logger.info(
+                f"✓ Class distribution: {dict(zip(class_names, class_counts.values()))}"
+            )
+            logger.info(f"✓ Class weights: {class_weights}")
+
+        return train_ds, val_ds, test_ds, class_names, class_weights
+
+
+# ============================================================================
+# MODEL BUILDER
+# ============================================================================
+
+
+class ModelBuilder:
+    """Advanced model builder with progressive fine-tuning"""
+
+    BASE_MODELS = {
         "ResNet50": ResNet50,
-        "EfficientNetB0": EfficientNetV2B0,
+        "EfficientNetV2B0": EfficientNetV2B0,
+        "EfficientNetV2B3": EfficientNetV2B3,
         "MobileNetV2": MobileNetV2,
-        "DenseNet121": DenseNet121,  # Added DenseNet121 based on SOTA
+        "DenseNet121": DenseNet121,
+        "ConvNeXtBase": ConvNeXtBase,
     }
 
-    try:
-        base = base_models[arch](
-            include_top=False, weights="imagenet", input_shape=IMG_SIZE + (3,)
+    @staticmethod
+    def build_model(arch: str, num_classes: int, config: Config) -> Tuple[Model, Model]:
+        """Build model with improved architecture"""
+        logger.info(f"Building {arch} model...")
+
+        base_model = None
+        for attempt in range(3):
+            try:
+                base_model = ModelBuilder.BASE_MODELS[arch](
+                    include_top=False,
+                    weights="imagenet",
+                    input_shape=config.img_size + (3,),
+                )
+                logger.info(f"✓ Loaded pretrained ImageNet weights for {arch}")
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(
+                        f"Attempt {attempt + 1} failed: {e}. Retrying in 2s..."
+                    )
+                    time.sleep(2)
+                else:
+                    logger.warning(
+                        f"Failed to load pretrained weights after 3 attempts: {e}"
+                    )
+                    logger.warning("Training from scratch (random initialization)...")
+                    base_model = ModelBuilder.BASE_MODELS[arch](
+                        include_top=False,
+                        weights=None,
+                        input_shape=config.img_size + (3,),
+                    )
+
+        base_model.trainable = False
+
+        inputs = keras.Input(shape=config.img_size + (3,))
+        x = base_model(inputs, training=False)
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(config.dropout_rate)(x)
+        x = layers.Dense(
+            512, activation="relu", kernel_regularizer=keras.regularizers.l2(0.001)
+        )(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(config.dropout_rate * 0.5)(x)
+        x = layers.Dense(
+            256, activation="relu", kernel_regularizer=keras.regularizers.l2(0.001)
+        )(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(config.dropout_rate * 0.5)(x)
+        outputs = layers.Dense(num_classes, activation="softmax", dtype="float32")(x)
+
+        model = keras.Model(inputs, outputs, name=arch)
+
+        if config.use_focal_loss:
+            loss = focal_loss(
+                gamma=config.focal_loss_gamma, alpha=config.focal_loss_alpha
+            )
+            logger.info(
+                f"✓ Using Focal Loss (gamma={config.focal_loss_gamma}, alpha={config.focal_loss_alpha})"
+            )
+        else:
+            loss = "sparse_categorical_crossentropy"
+
+        optimizer = keras.optimizers.Adam(
+            learning_rate=config.learning_rate, clipnorm=config.gradient_clip_value
         )
-    except (ValueError, OSError):
-        base = base_models[arch](
-            include_top=False, weights=None, input_shape=IMG_SIZE + (3,)
+
+        model.compile(
+            optimizer=optimizer,
+            loss=loss,
+            metrics=[
+                "accuracy",
+                keras.metrics.SparseTopKCategoricalAccuracy(k=2, name="top_2_accuracy"),
+                keras.metrics.SparseCategoricalCrossentropy(name="ce_loss"),
+            ],
         )
 
-    # Fine-tuning: Unfreeze last few layers for better accuracy
-    base.trainable = True
-    # Freeze initial layers
-    for layer in base.layers[:-20]:  # Unfreeze last 20 layers
-        layer.trainable = False
+        logger.info(f"\n{arch} Architecture Summary:")
+        model.summary(print_fn=lambda x: logger.info(x))
 
-    inputs = keras.Input(shape=IMG_SIZE + (3,))
-    x = base(inputs, training=False)
-    x = layers.GlobalAveragePooling2D()(x)
+        total_params = model.count_params()
+        trainable_params = sum(
+            [keras.backend.count_params(w) for w in model.trainable_weights]
+        )
+        logger.info(f"Total params: {total_params:,}")
+        logger.info(f"Trainable params: {trainable_params:,}")
+        logger.info(f"Non-trainable params: {total_params - trainable_params:,}")
 
-    # Enhanced dense layers
-    if use_dropout:
-        x = layers.Dropout(dropout_rate)(x)
-    x = layers.Dense(256, activation="relu")(x)  # Added dense layer
-    if use_dropout:
-        x = layers.Dropout(dropout_rate / 2)(x)
+        return model, base_model
 
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
 
-    model = keras.Model(inputs, outputs)
+# ============================================================================
+# TEST-TIME AUGMENTATION
+# ============================================================================
 
-    # Use different learning rates for different layers
-    model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-        loss="categorical_crossentropy",
-        metrics=[
-            "accuracy",
-            keras.metrics.TopKCategoricalAccuracy(k=2, name="top_2_accuracy"),
-        ],
+
+def predict_with_tta(model, images, config: Config) -> np.ndarray:
+    """Predict with test-time augmentation"""
+    if not config.use_tta:
+        return model.predict(images, verbose=0)
+
+    predictions = []
+
+    predictions.append(model.predict(images, verbose=0))
+
+    for _ in range(config.tta_steps - 1):
+        aug_images = images.numpy() if hasattr(images, "numpy") else images
+
+        if np.random.random() > 0.5:
+            aug_images = np.flip(aug_images, axis=2)
+
+        # Random brightness adjustment
+        brightness_factor = 0.9 + np.random.random() * 0.2
+        aug_images = aug_images * brightness_factor
+        aug_images = np.clip(aug_images, 0, 1)
+
+        predictions.append(model.predict(aug_images, verbose=0))
+
+    # Average predictions
+    return np.mean(predictions, axis=0)
+
+
+# ============================================================================
+# TRAINING FUNCTION
+# ============================================================================
+
+
+def train_single_model(args):
+    """Train a single model with two-phase approach"""
+    arch, train_ds, val_ds, test_ds, class_names, class_weights, config = args
+
+    gpus = tf.config.experimental.list_physical_devices("GPU")
+    if gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpus, True)
+        except RuntimeError as e:
+            logger.error(f"GPU configuration error: {e}")
+
+    logger.info(f"\n{'=' * 80}\nTraining {arch}...\n{'=' * 80}")
+
+    model, base_model = ModelBuilder.build_model(arch, len(class_names), config)
+
+    warmup_callback = WarmUpLearningRate(
+        warmup_epochs=config.warmup_epochs,
+        initial_lr=config.learning_rate * 0.1,
+        target_lr=config.learning_rate,
+        verbose=1,
     )
-    return model
 
+    progress_callback = ProgressCallback(arch)
 
-def train_and_evaluate(arch, train_gen, val_gen, test_gen):
-    """Train model and return comprehensive metrics."""
-    print(f"\n{'=' * 60}")
-    print(f"Training {arch}...")
-    print(f"{'=' * 60}")
-
-    arch_key = arch
-    model = build_model(arch_key, len(train_gen.class_indices))
-
-    # Compute class weights to handle class imbalance
-    class_weights_arr = compute_class_weight(
-        "balanced", classes=np.unique(train_gen.classes), y=train_gen.classes
-    )
-    class_weights_dict = {i: w for i, w in enumerate(class_weights_arr)}
-    print(f"Class weights: {class_weights_dict}")
-
-    # Enhanced callbacks
     callbacks = [
+        warmup_callback,
+        progress_callback,
         EarlyStopping(
-            monitor="val_loss", patience=10, restore_best_weights=True, verbose=1
+            monitor="val_loss",
+            patience=10,
+            restore_best_weights=True,
+            verbose=1,
+            min_delta=0.001,
         ),
         ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=5, min_lr=1e-7, verbose=1
+            monitor="val_loss",
+            factor=0.5,
+            patience=4,
+            min_lr=1e-7,
+            verbose=1,
+            cooldown=2,
         ),
         ModelCheckpoint(
-            f"{OUTPUT_DIR}/{arch}_best_model.h5",
+            f"{config.output_dir}/checkpoints/{arch}_phase1_best.h5",
             monitor="val_accuracy",
             save_best_only=True,
             verbose=1,
         ),
+        TensorBoard(
+            log_dir=f"{config.output_dir}/logs/{arch}_{datetime.now():%Y%m%d-%H%M%S}",
+            histogram_freq=1,
+            write_graph=True,
+            update_freq="epoch",
+        ),
+        CSVLogger(
+            f"{config.output_dir}/logs/{arch}_training_log.csv",
+            separator=",",
+            append=False,
+        ),
     ]
 
-    history = model.fit(
-        train_gen,
-        validation_data=val_gen,
-        epochs=EPOCHS,
-        class_weight=class_weights_dict,
+    logger.info(f"\n{arch}: PHASE 1 - Training classifier head (frozen backbone)...")
+    logger.info(f"Training for {config.phase1_epochs} epochs")
+
+    history1 = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=config.phase1_epochs,
+        class_weight=class_weights,
         callbacks=callbacks,
-        verbose=1,
+        verbose=0,
     )
 
-    # Evaluate on test set
-    test_gen.reset()
-    y_true = test_gen.classes
-    y_pred_proba = model.predict(test_gen, verbose=1)
+    logger.info(f"\n{arch}: PHASE 2 - Fine-tuning with unfrozen backbone...")
+    base_model.trainable = True
+
+    freeze_until = int(len(base_model.layers) * config.fine_tune_from_layer_percent)
+    for i, layer in enumerate(base_model.layers):
+        if i < freeze_until:
+            layer.trainable = False
+        else:
+            layer.trainable = True
+
+    trainable_layers = sum([1 for layer in base_model.layers if layer.trainable])
+    logger.info(
+        f"Unfrozen {trainable_layers}/{len(base_model.layers)} layers in base model"
+    )
+
+    # Recompile with lower learning rate
+    if config.use_focal_loss:
+        loss = focal_loss(gamma=config.focal_loss_gamma, alpha=config.focal_loss_alpha)
+    else:
+        loss = "sparse_categorical_crossentropy"
+
+    optimizer_finetune = keras.optimizers.Adam(
+        learning_rate=config.fine_tune_lr, clipnorm=config.gradient_clip_value
+    )
+
+    model.compile(
+        optimizer=optimizer_finetune,
+        loss=loss,
+        metrics=[
+            "accuracy",
+            keras.metrics.SparseTopKCategoricalAccuracy(k=2, name="top_2_accuracy"),
+            keras.metrics.SparseCategoricalCrossentropy(name="ce_loss"),
+        ],
+    )
+
+    callbacks_phase2 = [
+        progress_callback,
+        EarlyStopping(
+            monitor="val_loss",
+            patience=15,
+            restore_best_weights=True,
+            verbose=1,
+            min_delta=0.0001,
+        ),
+        ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.3,
+            patience=5,
+            min_lr=1e-8,
+            verbose=1,
+            cooldown=2,
+        ),
+        ModelCheckpoint(
+            f"{config.output_dir}/models/{arch}_best_model.h5",
+            monitor="val_accuracy",
+            save_best_only=True,
+            verbose=1,
+        ),
+        TensorBoard(
+            log_dir=f"{config.output_dir}/logs/{arch}_finetune_{datetime.now():%Y%m%d-%H%M%S}",
+            histogram_freq=1,
+        ),
+    ]
+
+    phase2_epochs = config.epochs - config.phase1_epochs
+    logger.info(f"Fine-tuning for {phase2_epochs} additional epochs")
+
+    history2 = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=config.phase1_epochs + phase2_epochs,
+        initial_epoch=config.phase1_epochs,
+        class_weight=class_weights,
+        callbacks=callbacks_phase2,
+        verbose=0,
+    )
+
+    logger.info(f"\n{arch}: Evaluating on test set...")
+
+    y_true = []
+    y_pred_list = []
+
+    for x_batch, y_batch in tqdm(test_ds, desc=f"Evaluating {arch}"):
+        y_true.extend(y_batch.numpy())
+
+        if config.use_tta:
+            predictions = predict_with_tta(model, x_batch, config)
+        else:
+            predictions = model.predict(x_batch, verbose=0)
+
+        y_pred_list.extend(predictions)
+
+    y_true = np.array(y_true)
+    y_pred_proba = np.array(y_pred_list)
     y_pred = np.argmax(y_pred_proba, axis=1)
 
-    # Calculate comprehensive metrics
     report = classification_report(
         y_true,
         y_pred,
         output_dict=True,
-        target_names=list(train_gen.class_indices.keys()),
+        target_names=class_names,
         digits=4,
+        zero_division=0,
     )
     cm = confusion_matrix(y_true, y_pred)
 
-    # Per-class metrics
     precision, recall, f1, support = precision_recall_fscore_support(
-        y_true, y_pred, average=None, labels=range(len(train_gen.class_indices))
+        y_true, y_pred, average=None, labels=range(len(class_names)), zero_division=0
     )
 
-    print(f"\n{arch} Results:")
-    print(f"Overall Accuracy: {report['accuracy']:.4f}")
-    print(f"Macro Avg F1: {report['macro avg']['f1-score']:.4f}")
-    print(f"Weighted Avg F1: {report['weighted avg']['f1-score']:.4f}")
+    logger.info(f"\n{arch} Test Results:")
+    logger.info(
+        f"  Accuracy: {report['accuracy']:.4f} ({report['accuracy'] * 100:.2f}%)"
+    )
+    logger.info(f"  Macro Avg Precision: {report['macro avg']['precision']:.4f}")
+    logger.info(f"  Macro Avg Recall: {report['macro avg']['recall']:.4f}")
+    logger.info(f"  Macro Avg F1: {report['macro avg']['f1-score']:.4f}")
+    logger.info(f"  Weighted Avg F1: {report['weighted avg']['f1-score']:.4f}")
+
+    combined_history = {
+        "loss": history1.history["loss"] + history2.history["loss"],
+        "val_loss": history1.history["val_loss"] + history2.history["val_loss"],
+        "accuracy": history1.history["accuracy"] + history2.history["accuracy"],
+        "val_accuracy": history1.history["val_accuracy"]
+        + history2.history["val_accuracy"],
+    }
+
+    keras.backend.clear_session()
+    del model
+    del base_model
+    gc.collect()
 
     return {
-        "model": model,
-        "history": history,
+        "arch": arch,
+        "model_path": f"{config.output_dir}/models/{arch}_best_model.h5",
+        "history": combined_history,
         "accuracy": report["accuracy"],
         "macro_avg": report["macro avg"],
         "weighted_avg": report["weighted avg"],
@@ -235,422 +743,634 @@ def train_and_evaluate(arch, train_gen, val_gen, test_gen):
     }
 
 
-def plot_training_curves(results_dict):
-    """Generate individual training curves for each model."""
-    for name, res in results_dict.items():
-        history = res["history"]
+# ============================================================================
+# SEQUENTIAL TRAINER (PROPER IMPLEMENTATION)
+# ============================================================================
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        # Accuracy plot
-        axes[0].plot(history.history["accuracy"], label="Train Accuracy", linewidth=2)
-        axes[0].plot(history.history["val_accuracy"], label="Val Accuracy", linewidth=2)
-        axes[0].set_title(
-            f"{name} - Accuracy over Epochs", fontsize=14, fontweight="bold"
+class SequentialTrainer:
+    """Sequential model training (for single GPU)"""
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def train_all_models(self, train_ds, val_ds, test_ds, class_names, class_weights):
+        """Train multiple models sequentially"""
+        logger.info(
+            f"\nTraining {len(self.config.models_to_train)} models sequentially..."
         )
-        axes[0].set_xlabel("Epoch", fontsize=12)
-        axes[0].set_ylabel("Accuracy", fontsize=12)
-        axes[0].legend(fontsize=11)
-        axes[0].grid(True, alpha=0.3)
+        logger.info("Note: Sequential training is optimal for single GPU setups")
 
-        # Loss plot
-        axes[1].plot(history.history["loss"], label="Train Loss", linewidth=2)
-        axes[1].plot(history.history["val_loss"], label="Val Loss", linewidth=2)
-        axes[1].set_title(f"{name} - Loss over Epochs", fontsize=14, fontweight="bold")
-        axes[1].set_xlabel("Epoch", fontsize=12)
-        axes[1].set_ylabel("Loss", fontsize=12)
-        axes[1].legend(fontsize=11)
-        axes[1].grid(True, alpha=0.3)
+        results = {}
 
-        plt.tight_layout()
-        plt.savefig(
-            f"{OUTPUT_DIR}/training_curves/{name}_training_curves.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-        print(f"Saved training curves for {name}")
+        for i, arch in enumerate(self.config.models_to_train, 1):
+            logger.info(f"\n{'=' * 80}")
+            logger.info(
+                f"Training model {i}/{len(self.config.models_to_train)}: {arch}"
+            )
+            logger.info(f"{'=' * 80}\n")
 
+            args = (
+                arch,
+                train_ds,
+                val_ds,
+                test_ds,
+                class_names,
+                class_weights,
+                self.config,
+            )
+            result = train_single_model(args)
+            results[result["arch"]] = result
 
-def generate_comparison_table(results_dict, class_names):
-    """Generate enhanced performance comparison table."""
-    data = []
-    for name, res in results_dict.items():
-        data.append(
-            {
-                "Model": name,
-                "Accuracy": f"{res['accuracy']:.4f}",
-                "Precision": f"{res['weighted_avg']['precision']:.4f}",
-                "Recall": f"{res['weighted_avg']['recall']:.4f}",
-                "F1-Score": f"{res['weighted_avg']['f1-score']:.4f}",
-                "Macro F1": f"{res['macro_avg']['f1-score']:.4f}",
-            }
-        )
+            gc.collect()
+            if gpus:
+                tf.keras.backend.clear_session()
 
-    df = pd.DataFrame(data)
-    df = df.sort_values("Accuracy", ascending=False)
-
-    # Save to CSV
-    df.to_csv(f"{OUTPUT_DIR}/table_model_comparison.csv", index=False)
-
-    # Print to console
-    print("\n" + "=" * 80)
-    print("MODEL COMPARISON TABLE")
-    print("=" * 80)
-    print(df.to_string(index=False))
-    print("=" * 80)
-
-    # Save to LaTeX
-    with open(f"{OUTPUT_DIR}/table_model_comparison.tex", "w") as f:
-        f.write("\\begin{table}[h]\n\\centering\n")
-        f.write(
-            "\\caption{Performance Comparison of CNN Architectures on Waste Classification}\n"
-        )
-        f.write("\\label{tab:model_comparison}\n")
-        f.write(df.to_latex(index=False, escape=False))
-        f.write("\\end{table}\n")
-
-    return df
+        logger.info("✓ All models trained successfully")
+        return results
 
 
-def plot_individual_confusion_matrices(results_dict, class_names):
-    """Generate individual confusion matrix for each model."""
-    for name, res in results_dict.items():
-        fig, ax = plt.subplots(figsize=(10, 8))
-
-        # Normalize confusion matrix
-        cm_norm = res["cm"].astype("float") / res["cm"].sum(axis=1)[:, np.newaxis]
-
-        sns.heatmap(
-            cm_norm,
-            annot=True,
-            fmt=".3f",
-            cmap="Blues",
-            ax=ax,
-            xticklabels=class_names,
-            yticklabels=class_names,
-            cbar_kws={"label": "Normalized Frequency"},
-            vmin=0,
-            vmax=1,
-            square=True,
-        )
-
-        ax.set_title(
-            f"{name} - Confusion Matrix\nAccuracy: {res['accuracy']:.4f}",
-            fontsize=14,
-            fontweight="bold",
-            pad=20,
-        )
-        ax.set_ylabel("True Label", fontsize=12, fontweight="bold")
-        ax.set_xlabel("Predicted Label", fontsize=12, fontweight="bold")
-
-        plt.xticks(rotation=45, ha="right")
-        plt.yticks(rotation=0)
-        plt.tight_layout()
-        plt.savefig(
-            f"{OUTPUT_DIR}/confusion_matrices/{name}_confusion_matrix.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-        print(f"Saved confusion matrix for {name}")
+# ============================================================================
+# XAI EXPLAINER
+# ============================================================================
 
 
-def plot_per_class_metrics(results_dict, class_names):
-    """Generate per-class performance metrics for each model."""
-    for name, res in results_dict.items():
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+class XAIExplainer:
+    """Comprehensive XAI explanation generator with optimizations"""
 
-        precision = res["per_class_precision"]
-        recall = res["per_class_recall"]
-        f1 = res["per_class_f1"]
+    def __init__(self, model_path: str, class_names: List[str], config: Config):
+        self.model = keras.models.load_model(model_path, compile=False)
+        self.class_names = class_names
+        self.config = config
+        self.grad_cam_model = self._build_grad_cam_model()
+        self.lime_explainer = lime_image.LimeImageExplainer()
 
-        x = np.arange(len(class_names))
-        width = 0.25
+    def __del__(self):
+        """Cleanup on deletion"""
+        if hasattr(self, "grad_cam_model") and self.grad_cam_model:
+            del self.grad_cam_model
+        if hasattr(self, "model"):
+            del self.model
+        keras.backend.clear_session()
 
-        # Precision
-        axes[0].bar(
-            x, precision, width, label="Precision", color="steelblue", alpha=0.8
-        )
-        axes[0].set_xlabel("Class", fontsize=12, fontweight="bold")
-        axes[0].set_ylabel("Precision", fontsize=12, fontweight="bold")
-        axes[0].set_title(
-            f"{name} - Per-Class Precision", fontsize=13, fontweight="bold"
-        )
-        axes[0].set_xticks(x)
-        axes[0].set_xticklabels(class_names, rotation=45, ha="right")
-        axes[0].set_ylim([0, 1.05])
-        axes[0].grid(axis="y", alpha=0.3)
-
-        # Recall
-        axes[1].bar(x, recall, width, label="Recall", color="forestgreen", alpha=0.8)
-        axes[1].set_xlabel("Class", fontsize=12, fontweight="bold")
-        axes[1].set_ylabel("Recall", fontsize=12, fontweight="bold")
-        axes[1].set_title(f"{name} - Per-Class Recall", fontsize=13, fontweight="bold")
-        axes[1].set_xticks(x)
-        axes[1].set_xticklabels(class_names, rotation=45, ha="right")
-        axes[1].set_ylim([0, 1.05])
-        axes[1].grid(axis="y", alpha=0.3)
-
-        # F1-Score
-        axes[2].bar(x, f1, width, label="F1-Score", color="coral", alpha=0.8)
-        axes[2].set_xlabel("Class", fontsize=12, fontweight="bold")
-        axes[2].set_ylabel("F1-Score", fontsize=12, fontweight="bold")
-        axes[2].set_title(
-            f"{name} - Per-Class F1-Score", fontsize=13, fontweight="bold"
-        )
-        axes[2].set_xticks(x)
-        axes[2].set_xticklabels(class_names, rotation=45, ha="right")
-        axes[2].set_ylim([0, 1.05])
-        axes[2].grid(axis="y", alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(
-            f"{OUTPUT_DIR}/per_class_metrics/{name}_per_class_metrics.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-        print(f"Saved per-class metrics for {name}")
-
-
-def grad_cam(model, img_array, pred_class_idx, layer_name=None):
-    """Generate Grad-CAM heatmap."""
-    # Find the last convolutional layer if not specified
-    if layer_name is None:
-        for layer in reversed(model.layers):
-            if len(layer.output_shape) == 4:  # Convolutional layer
-                layer_name = layer.name
+    def _build_grad_cam_model(self):
+        """Build Grad-CAM model"""
+        last_conv_layer = None
+        for layer in reversed(self.model.layers):
+            if len(layer.output_shape) == 4:
+                last_conv_layer = layer.name
                 break
 
-    grad_model = Model(
-        inputs=model.input, outputs=[model.get_layer(layer_name).output, model.output]
-    )
+        if last_conv_layer is None:
+            logger.warning("No convolutional layer found for Grad-CAM")
+            return None
 
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(np.expand_dims(img_array, 0))
-        loss = predictions[:, pred_class_idx]
+        logger.info(f"Using layer '{last_conv_layer}' for Grad-CAM")
 
-    grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        return keras.Model(
+            [self.model.inputs],
+            [self.model.get_layer(last_conv_layer).output, self.model.output],
+        )
 
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
+    def grad_cam(self, img_array: np.ndarray, class_idx: int) -> np.ndarray:
+        """Generate Grad-CAM heatmap"""
+        if self.grad_cam_model is None:
+            return np.zeros(self.config.img_size)
 
-    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-    heatmap = heatmap.numpy()
-
-    # Resize heatmap to image size
-    heatmap = cv2.resize(heatmap, IMG_SIZE)
-
-    return heatmap
-
-
-def occlusion_sensitivity(model, img_array, pred_class_idx, patch_size=20, stride=10):
-    """Generate occlusion sensitivity heatmap."""
-    height, width = IMG_SIZE
-    heatmap = np.zeros((height, width))
-
-    baseline_pred = model.predict(np.expand_dims(img_array, 0), verbose=0)[0][
-        pred_class_idx
-    ]
-
-    for y in range(0, height - patch_size, stride):
-        for x in range(0, width - patch_size, stride):
-            occluded_img = img_array.copy()
-            occluded_img[y : y + patch_size, x : x + patch_size] = 0.5
-
-            occluded_pred = model.predict(np.expand_dims(occluded_img, 0), verbose=0)[
-                0
-            ][pred_class_idx]
-            importance = baseline_pred - occluded_pred
-
-            heatmap[y : y + patch_size, x : x + patch_size] += importance
-
-    heatmap = np.maximum(heatmap, 0)
-    if heatmap.max() > 0:
-        heatmap = heatmap / heatmap.max()
-
-    return heatmap
-
-
-def integrated_gradients(model, img_array, pred_class_idx, baseline=None, steps=50):
-    """Generate integrated gradients attribution map."""
-    if baseline is None:
-        baseline = np.zeros_like(img_array)
-
-    img_tensor = tf.convert_to_tensor(img_array, dtype=tf.float32)
-    baseline_tensor = tf.convert_to_tensor(baseline, dtype=tf.float32)
-
-    alphas = tf.linspace(0.0, 1.0, steps + 1)
-    gradient_batches = []
-
-    for alpha in alphas:
-        interpolated = baseline_tensor + alpha * (img_tensor - baseline_tensor)
-        interpolated = tf.expand_dims(interpolated, 0)
+        img_array_expanded = np.expand_dims(img_array, axis=0)
 
         with tf.GradientTape() as tape:
-            tape.watch(interpolated)
-            preds = model(interpolated)
-            target_class = preds[:, pred_class_idx]
+            conv_outputs, predictions = self.grad_cam_model(img_array_expanded)
+            loss = predictions[:, class_idx]
 
-        grads = tape.gradient(target_class, interpolated)
-        gradient_batches.append(grads[0])
+        grads = tape.gradient(loss, conv_outputs)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    grads = tf.stack(gradient_batches)
-    avg_grads = tf.reduce_mean(grads, axis=0)
+        conv_outputs = conv_outputs
+        heatmap = tf.reduce_sum(tf.multiply(pooled_grads, conv_outputs), axis=-1)
+        heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-10)
 
-    integrated_grads = (img_tensor - baseline_tensor) * avg_grads
-    attribution = tf.reduce_sum(tf.abs(integrated_grads), axis=-1)
+        heatmap = cv2.resize(heatmap.numpy(), self.config.img_size)
 
-    attribution = attribution.numpy()
-    if attribution.max() > 0:
-        attribution = attribution / attribution.max()
+        return heatmap
 
-    return attribution
+    def occlusion_sensitivity(
+        self, img_array: np.ndarray, class_idx: int
+    ) -> np.ndarray:
+        """Generate occlusion sensitivity map with batched predictions (OPTIMIZED)"""
+        h, w = self.config.img_size
+
+        baseline_pred = self.model.predict(np.expand_dims(img_array, 0), verbose=0)[
+            class_idx
+        ]
+
+        occluded_images = []
+        positions = []
+
+        for y in range(0, h - self.config.occlusion_size, self.config.occlusion_stride):
+            for x in range(
+                0, w - self.config.occlusion_size, self.config.occlusion_stride
+            ):
+                occluded = img_array.copy()
+                occluded[
+                    y : y + self.config.occlusion_size,
+                    x : x + self.config.occlusion_size,
+                ] = 0
+                occluded_images.append(occluded)
+                positions.append((y, x))
+
+        occluded_batch = np.array(occluded_images)
+        predictions = self.model.predict(
+            occluded_batch, batch_size=self.config.occlusion_batch_size, verbose=0
+        )
+
+        sensitivity_map = np.zeros((h, w))
+        for (y, x), pred in zip(positions, predictions):
+            sensitivity = baseline_pred - pred[class_idx]
+            sensitivity_map[
+                y : y + self.config.occlusion_size, x : x + self.config.occlusion_size
+            ] = max(sensitivity_map[y, x], sensitivity)
+
+        if sensitivity_map.max() > sensitivity_map.min():
+            sensitivity_map = (sensitivity_map - sensitivity_map.min()) / (
+                sensitivity_map.max() - sensitivity_map.min()
+            )
+
+        return sensitivity_map
+
+    def integrated_gradients(
+        self, img_array: np.ndarray, class_idx: int, steps: int = 50
+    ) -> np.ndarray:
+        """Generate Integrated Gradients attribution"""
+        baseline = np.zeros_like(img_array)
+
+        alphas = np.linspace(0, 1, steps)
+        interpolated_images = np.array(
+            [baseline + alpha * (img_array - baseline) for alpha in alphas]
+        )
+
+        gradients = []
+        for img in interpolated_images:
+            img_batch = np.expand_dims(img, 0)
+            with tf.GradientTape() as tape:
+                img_tensor = tf.Variable(img_batch, dtype=tf.float32)
+                predictions = self.model(img_tensor)
+                loss = predictions[:, class_idx]
+
+            grads = tape.gradient(loss, img_tensor)
+            gradients.append(grads.numpy())
+
+        avg_gradients = np.mean(gradients, axis=0)
+        integrated_grads = (img_array - baseline) * avg_gradients
+
+        attribution = np.sum(np.abs(integrated_grads), axis=-1)
+
+        if attribution.max() > attribution.min():
+            attribution = (attribution - attribution.min()) / (
+                attribution.max() - attribution.min()
+            )
+
+        return attribution
+
+    def lime_explain(self, img_array: np.ndarray, class_idx: int) -> np.ndarray:
+        """Generate LIME explanation"""
+
+        def predict_fn(images):
+            return self.model.predict(images, verbose=0)
+
+        img_uint8 = (img_array * 255).astype(np.uint8)
+
+        explanation = self.lime_explainer.explain_instance(
+            img_uint8, predict_fn, top_labels=1, num_samples=300, random_seed=42
+        )
+
+        temp, mask = explanation.get_image_and_mask(
+            class_idx, positive_only=True, num_features=5, hide_rest=False
+        )
+
+        return mask.astype(np.float32)
+
+    def explain_all(self, img_array: np.ndarray, true_class: str) -> Dict:
+        """Generate all explanations for an image"""
+        pred_proba = self.model.predict(np.expand_dims(img_array, 0), verbose=0)
+        pred_idx = int(np.argmax(pred_proba))
+        pred_class = self.class_names[pred_idx]
+        confidence = float(pred_proba[pred_idx])
+
+        explanations = {
+            "true_class": true_class,
+            "pred_class": pred_class,
+            "confidence": confidence,
+        }
+
+        if "grad_cam" in self.config.xai_methods:
+            try:
+                explanations["grad_cam"] = self.grad_cam(img_array, pred_idx)
+            except Exception as e:
+                logger.warning(f"Grad-CAM failed: {e}")
+                explanations["grad_cam"] = None
+
+        if "occlusion" in self.config.xai_methods:
+            try:
+                explanations["occlusion"] = self.occlusion_sensitivity(
+                    img_array, pred_idx
+                )
+            except Exception as e:
+                logger.warning(f"Occlusion failed: {e}")
+                explanations["occlusion"] = None
+
+        if "integrated_gradients" in self.config.xai_methods:
+            try:
+                explanations["integrated_gradients"] = self.integrated_gradients(
+                    img_array, pred_idx
+                )
+            except Exception as e:
+                logger.warning(f"Integrated Gradients failed: {e}")
+                explanations["integrated_gradients"] = None
+
+        if "lime" in self.config.xai_methods:
+            try:
+                explanations["lime"] = self.lime_explain(img_array, pred_idx)
+            except Exception as e:
+                logger.warning(f"LIME failed: {e}")
+                explanations["lime"] = None
+
+        return explanations
 
 
-def generate_xai_figure(model, test_path, class_names, model_name, num_samples=6):
-    """Generate comprehensive XAI visualizations with individual saves."""
-    sample_images = []
+# ============================================================================
+# XAI VISUALIZATION (MULTIPROCESSING)
+# ============================================================================
 
-    # Select samples from different classes
-    for cls in class_names[:num_samples]:
-        cls_path = Path(test_path) / cls
-        if cls_path.exists():
-            imgs = sorted(list(cls_path.glob("*.jpg")) + list(cls_path.glob("*.png")))
-            if imgs:
-                sample_images.append((str(imgs[0]), cls))
 
-    if not sample_images:
-        print("Warning: No sample images found for XAI visualization.")
-        return
+def process_single_xai_worker(args):
+    """Worker function for multiprocessing XAI generation"""
+    model_path, img_path, class_name, sample_idx, output_dir, class_names, config = args
 
-    # Create directory for this model's XAI visualizations
-    model_xai_dir = f"{OUTPUT_DIR}/xai_visualizations/{model_name}"
-    os.makedirs(model_xai_dir, exist_ok=True)
+    try:
+        explainer = XAIExplainer(model_path, class_names, config)
 
-    for idx, (img_path, true_class) in enumerate(sample_images):
-        img = Image.open(img_path).convert("RGB").resize(IMG_SIZE)
+        img = Image.open(img_path).convert("RGB").resize(config.img_size)
         img_array = np.array(img) / 255.0
 
-        pred = model.predict(np.expand_dims(img_array, 0), verbose=0)[0]
-        pred_class_idx = np.argmax(pred)
-        pred_class = class_names[pred_class_idx]
-        confidence = np.max(pred)
+        explanations = explainer.explain_all(img_array, class_name)
 
-        # Create individual figure for this sample
-        fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-
-        # Original Image
-        axes[0].imshow(img)
-        axes[0].set_title(
-            f"Original\nTrue: {true_class}\nPred: {pred_class}\nConf: {confidence:.3f}",
-            fontsize=10,
-            fontweight="bold",
+        n_methods = sum(
+            1
+            for k in explanations
+            if k not in ["true_class", "pred_class", "confidence"]
+            and explanations[k] is not None
         )
-        axes[0].axis("off")
 
-        # Grad-CAM
-        try:
-            print(f"  Computing Grad-CAM for {true_class}...")
-            gradcam_map = grad_cam(model, img_array, pred_class_idx)
-            gradcam_resized = np.uint8(255 * gradcam_map)
+        fig, axes = plt.subplots(1, n_methods + 1, figsize=(5 * (n_methods + 1), 5))
+        if n_methods == 0:
+            axes = [axes]
 
-            axes[1].imshow(img)
-            axes[1].imshow(gradcam_resized, cmap="jet", alpha=0.5)
-            axes[1].set_title("Grad-CAM", fontsize=10, fontweight="bold")
-            axes[1].axis("off")
-        except Exception as e:
-            print(f"    Grad-CAM error: {str(e)}")
-            axes[1].imshow(img)
-            axes[1].set_title("Grad-CAM (error)", fontsize=10)
-            axes[1].axis("off")
+        axes.imshow(img)
+        axes.set_title(
+            f"Original\nTrue: {explanations['true_class']}\n"
+            f"Pred: {explanations['pred_class']}\n"
+            f"Conf: {explanations['confidence']:.3f}",
+            fontsize=10,
+        )
+        axes.axis("off")
 
-        # Occlusion Sensitivity
-        try:
-            print(f"  Computing Occlusion for {true_class}...")
-            occlusion_map = occlusion_sensitivity(model, img_array, pred_class_idx)
-            occlusion_resized = np.uint8(255 * occlusion_map)
+        ax_idx = 1
+        for method in ["grad_cam", "occlusion", "integrated_gradients", "lime"]:
+            if method in explanations and explanations[method] is not None:
+                axes[ax_idx].imshow(img)
 
-            axes[2].imshow(img)
-            axes[2].imshow(occlusion_resized, cmap="jet", alpha=0.5)
-            axes[2].set_title("Occlusion", fontsize=10, fontweight="bold")
-            axes[2].axis("off")
-        except Exception as e:
-            print(f"    Occlusion error: {str(e)}")
-            axes[2].imshow(img)
-            axes[2].set_title("Occlusion (error)", fontsize=10)
-            axes[2].axis("off")
+                if method == "lime":
+                    axes[ax_idx].imshow(explanations[method], cmap="jet", alpha=0.3)
+                else:
+                    axes[ax_idx].imshow(explanations[method], cmap="jet", alpha=0.5)
 
-        # Integrated Gradients
-        try:
-            print(f"  Computing Integrated Gradients for {true_class}...")
-            ig_map = integrated_gradients(model, img_array, pred_class_idx)
-            ig_resized = np.uint8(255 * ig_map)
-
-            axes[3].imshow(img)
-            axes[3].imshow(ig_resized, cmap="hot", alpha=0.5)
-            axes[3].set_title("Integrated Gradients", fontsize=10, fontweight="bold")
-            axes[3].axis("off")
-        except Exception as e:
-            print(f"    Integrated Gradients error: {str(e)}")
-            axes[3].imshow(img)
-            axes[3].set_title("Int. Gradients (error)", fontsize=10)
-            axes[3].axis("off")
-
-        # LIME
-        try:
-            print(f"  Computing LIME for {true_class}...")
-            explainer = lime_image.LimeImageExplainer()
-            explanation = explainer.explain_instance(
-                img_array.astype(np.float64),
-                lambda x: model.predict(x, verbose=0),
-                top_labels=1,
-                num_samples=300,
-                random_seed=42,
-            )
-            temp, mask = explanation.get_image_and_mask(
-                pred_class_idx, positive_only=True, num_features=5, hide_rest=False
-            )
-
-            lime_vis = mark_boundaries(temp, mask)
-            axes[4].imshow(lime_vis)
-            axes[4].set_title("LIME", fontsize=10, fontweight="bold")
-            axes[4].axis("off")
-        except Exception as e:
-            print(f"    LIME error: {str(e)}")
-            axes[4].imshow(img)
-            axes[4].set_title("LIME (error)", fontsize=10)
-            axes[4].axis("off")
+                axes[ax_idx].set_title(method.replace("_", " ").title(), fontsize=10)
+                axes[ax_idx].axis("off")
+                ax_idx += 1
 
         plt.tight_layout()
-        plt.savefig(
-            f"{model_xai_dir}/{true_class}_sample_{idx}_xai.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
+        output_path = f"{output_dir}/{class_name}_sample_{sample_idx}_xai.png"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
         plt.close()
-        print(f"  Saved XAI visualization for {true_class} (sample {idx})")
+
+        del explainer
+        keras.backend.clear_session()
+
+        return output_path
+
+    except Exception as e:
+        logger.error(f"XAI generation failed for {img_path}: {e}")
+        return None
 
 
-def save_detailed_report(results_dict, class_names):
-    """Save comprehensive detailed report."""
-    report_path = f"{OUTPUT_DIR}/detailed_report.txt"
+def generate_xai_visualizations_parallel(
+    model_path: str,
+    test_dir: str,
+    class_names: List[str],
+    model_name: str,
+    config: Config,
+):
+    """Generate XAI visualizations using multiprocessing (FIXED)"""
+    logger.info(f"Generating XAI visualizations for {model_name}...")
+
+    output_dir = f"{config.output_dir}/xai_visualizations/{model_name}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Collect sample paths
+    sample_paths = []
+    for cls in class_names:
+        cls_path = Path(test_dir) / cls
+        if cls_path.exists():
+            imgs = sorted(list(cls_path.glob("*.jpg")) + list(cls_path.glob("*.png")))
+            for idx, img_path in enumerate(imgs[: config.xai_samples_per_class]):
+                sample_paths.append((str(img_path), cls, idx))
+
+    logger.info(
+        f"Processing {len(sample_paths)} images with {len(config.xai_methods)} XAI methods"
+    )
+
+    args_list = [
+        (model_path, img_path, cls, idx, output_dir, class_names, config)
+        for img_path, cls, idx in sample_paths
+    ]
+
+    num_processes = min(config.num_workers, len(sample_paths))
+    logger.info(f"Using {num_processes} parallel workers")
+
+    with mp.Pool(processes=num_processes) as pool:
+        results = list(
+            tqdm(
+                pool.imap(process_single_xai_worker, args_list),
+                total=len(args_list),
+                desc="Generating XAI visualizations",
+            )
+        )
+
+    successful = sum(1 for r in results if r is not None)
+    logger.info(f"✓ XAI visualization complete: {successful}/{len(results)} successful")
+
+
+# ============================================================================
+# VISUALIZATION FUNCTIONS
+# ============================================================================
+
+
+def plot_training_curves(results: Dict, config: Config):
+    """Plot training curves for all models"""
+    logger.info("Generating training curves...")
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    for name, res in results.items():
+        history = res["history"]
+
+        axes[0, 0].plot(history["loss"], label=f"{name} (train)", linewidth=2)
+        axes[0, 0].plot(
+            history["val_loss"], label=f"{name} (val)", linestyle="--", linewidth=2
+        )
+
+        axes[0, 1].plot(history["accuracy"], label=f"{name} (train)", linewidth=2)
+        axes[0, 1].plot(
+            history["val_accuracy"], label=f"{name} (val)", linestyle="--", linewidth=2
+        )
+
+    axes[0, 0].set_title("Model Loss", fontsize=14, fontweight="bold")
+    axes[0, 0].set_xlabel("Epoch", fontsize=12)
+    axes[0, 0].set_ylabel("Loss", fontsize=12)
+    axes[0, 0].legend(fontsize=10)
+    axes[0, 0].grid(True, alpha=0.3)
+
+    axes[0, 1].set_title("Model Accuracy", fontsize=14, fontweight="bold")
+    axes[0, 1].set_xlabel("Epoch", fontsize=12)
+    axes[0, 1].set_ylabel("Accuracy", fontsize=12)
+    axes[0, 1].legend(fontsize=10)
+    axes[0, 1].grid(True, alpha=0.3)
+
+    models = list(results.keys())
+    accuracies = [results[m]["accuracy"] for m in models]
+    f1_scores = [results[m]["macro_avg"]["f1-score"] for m in models]
+
+    colors = plt.cm.Set3(np.linspace(0, 1, len(models)))
+
+    bars1 = axes[1, 0].bar(
+        models, accuracies, color=colors, edgecolor="black", linewidth=1.5
+    )
+    axes[1, 0].set_title("Final Test Accuracy", fontsize=14, fontweight="bold")
+    axes[1, 0].set_ylabel("Accuracy", fontsize=12)
+    axes[1, 0].set_ylim([max(0, min(accuracies) - 0.1), 1])
+    axes[1, 0].grid(True, alpha=0.3, axis="y")
+
+    for i, (bar, v) in enumerate(zip(bars1, accuracies)):
+        axes[1, 0].text(
+            bar.get_x() + bar.get_width() / 2,
+            v + 0.01,
+            f"{v:.4f}\n({v * 100:.2f}%)",
+            ha="center",
+            fontweight="bold",
+            fontsize=9,
+        )
+
+    bars2 = axes[1, 1].bar(
+        models, f1_scores, color=colors, edgecolor="black", linewidth=1.5
+    )
+    axes[1, 1].set_title("Final Macro F1-Score", fontsize=14, fontweight="bold")
+    axes[1, 1].set_ylabel("F1-Score", fontsize=12)
+    axes[1, 1].set_ylim([max(0, min(f1_scores) - 0.1), 1])
+    axes[1, 1].grid(True, alpha=0.3, axis="y")
+
+    for i, (bar, v) in enumerate(zip(bars2, f1_scores)):
+        axes[1, 1].text(
+            bar.get_x() + bar.get_width() / 2,
+            v + 0.01,
+            f"{v:.4f}",
+            ha="center",
+            fontweight="bold",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(
+        f"{config.output_dir}/training_curves/all_models_comparison.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+    logger.info("✓ Training curves saved")
+
+
+def plot_confusion_matrices(results: Dict, class_names: List[str], config: Config):
+    """Plot confusion matrices for all models"""
+    logger.info("Generating confusion matrices...")
+
+    n_models = len(results)
+    cols = 2
+    rows = (n_models + 1) // 2
+
+    fig, axes = plt.subplots(rows, cols, figsize=(14 * cols, 12 * rows))
+    if n_models == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+
+    for idx, (name, res) in enumerate(results.items()):
+        cm = res["cm"]
+        cm_normalized = cm.astype("float") / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
+
+        sns.heatmap(
+            cm_normalized,
+            annot=True,
+            fmt=".2%",
+            cmap="Blues",
+            xticklabels=class_names,
+            yticklabels=class_names,
+            ax=axes[idx],
+            cbar_kws={"label": "Normalized Proportion"},
+            vmin=0,
+            vmax=1,
+        )
+
+        axes[idx].set_title(
+            f"{name}\nAccuracy: {res['accuracy']:.4f} ({res['accuracy'] * 100:.2f}%)",
+            fontsize=14,
+            fontweight="bold",
+        )
+        axes[idx].set_ylabel("True Label", fontsize=12)
+        axes[idx].set_xlabel("Predicted Label", fontsize=12)
+
+    for idx in range(n_models, len(axes)):
+        axes[idx].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(
+        f"{config.output_dir}/confusion_matrices/all_confusion_matrices.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+    logger.info("✓ Confusion matrices saved")
+
+
+def plot_per_class_metrics(results: Dict, class_names: List[str], config: Config):
+    """Plot per-class metrics comparison"""
+    logger.info("Generating per-class metrics...")
+
+    metrics = ["precision", "recall", "f1"]
+    fig, axes = plt.subplots(1, 3, figsize=(22, 6))
+
+    x = np.arange(len(class_names))
+    width = 0.8 / len(results)
+
+    colors = plt.cm.Set2(np.linspace(0, 1, len(results)))
+
+    for metric_idx, metric in enumerate(metrics):
+        for model_idx, (name, res) in enumerate(results.items()):
+            offset = width * model_idx - width * len(results) / 2
+
+            if metric == "precision":
+                values = res["per_class_precision"]
+            elif metric == "recall":
+                values = res["per_class_recall"]
+            else:
+                values = res["per_class_f1"]
+
+            axes[metric_idx].bar(
+                x + offset,
+                values,
+                width,
+                label=name,
+                color=colors[model_idx],
+                edgecolor="black",
+                linewidth=0.8,
+            )
+
+        axes[metric_idx].set_title(
+            f"Per-Class {metric.capitalize()}", fontsize=14, fontweight="bold"
+        )
+        axes[metric_idx].set_ylabel(metric.capitalize(), fontsize=12)
+        axes[metric_idx].set_xlabel("Class", fontsize=12)
+        axes[metric_idx].set_xticks(x)
+        axes[metric_idx].set_xticklabels(class_names, rotation=45, ha="right")
+        axes[metric_idx].legend(fontsize=10)
+        axes[metric_idx].grid(True, alpha=0.3, axis="y")
+        axes[metric_idx].set_ylim([0, 1.05])
+
+    plt.tight_layout()
+    plt.savefig(
+        f"{config.output_dir}/per_class_metrics/per_class_comparison.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close()
+
+    logger.info("✓ Per-class metrics saved")
+
+
+# ============================================================================
+# REPORTING
+# ============================================================================
+
+
+def save_comprehensive_report(results: Dict, class_names: List[str], config: Config):
+    """Save text and JSON reports"""
+    logger.info("Generating comprehensive report...")
+
+    report_path = f"{config.output_dir}/comprehensive_report.txt"
 
     with open(report_path, "w") as f:
-        f.write("=" * 80 + "\n")
-        f.write("COMPREHENSIVE WASTE SORTING MODEL EVALUATION REPORT\n")
+        f.write("=" * 100 + "\n")
+        f.write("IMPROVED WASTE SORTING SYSTEM - COMPREHENSIVE REPORT\n")
         f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write("=" * 80 + "\n\n")
+        f.write("=" * 100 + "\n\n")
 
-        for name, res in results_dict.items():
-            f.write(f"\n{'=' * 80}\n")
+        f.write("CONFIGURATION:\n")
+        f.write(f"  Data Root: {config.data_root}\n")
+        f.write(f"  Image Size: {config.img_size}\n")
+        f.write(f"  Batch Size: {config.batch_size}\n")
+        f.write(f"  Total Epochs: {config.epochs}\n")
+        f.write(f"  Phase 1 Epochs: {config.phase1_epochs}\n")
+        f.write(f"  Phase 2 Epochs: {config.epochs - config.phase1_epochs}\n")
+        f.write(f"  Learning Rate (Phase 1): {config.learning_rate}\n")
+        f.write(f"  Learning Rate (Phase 2): {config.fine_tune_lr}\n")
+        f.write(f"  Dropout Rate: {config.dropout_rate}\n")
+        f.write(f"  Use Focal Loss: {config.use_focal_loss}\n")
+        if config.use_focal_loss:
+            f.write(f"  Focal Loss Gamma: {config.focal_loss_gamma}\n")
+            f.write(f"  Focal Loss Alpha: {config.focal_loss_alpha}\n")
+        f.write(f"  Use Class Weights: {config.use_class_weights}\n")
+        f.write(f"  Use TTA: {config.use_tta}\n")
+        f.write(f"  Mixed Precision: {config.use_mixed_precision}\n")
+        f.write(f"  Classes: {', '.join(class_names)}\n\n")
+
+        f.write("MODEL COMPARISON:\n")
+        f.write(
+            f"{'Model':<25} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1-Score':<12}\n"
+        )
+        f.write("-" * 100 + "\n")
+
+        sorted_results = sorted(
+            results.items(), key=lambda x: x["accuracy"], reverse=True
+        )
+
+        for rank, (name, res) in enumerate(sorted_results, 1):
+            f.write(
+                f"{rank}. {name:<22} "
+                f"{res['accuracy']:<12.4f} "
+                f"{res['weighted_avg']['precision']:<12.4f} "
+                f"{res['weighted_avg']['recall']:<12.4f} "
+                f"{res['weighted_avg']['f1-score']:<12.4f}\n"
+            )
+
+        f.write("\n" + "=" * 100 + "\n\n")
+
+        for name, res in results.items():
+            f.write(f"\n{'=' * 100}\n")
             f.write(f"MODEL: {name}\n")
-            f.write(f"{'=' * 80}\n\n")
+            f.write(f"{'=' * 100}\n\n")
 
-            f.write(f"Overall Metrics:\n")
+            f.write("Overall Metrics:\n")
             f.write(
                 f"  Accuracy: {res['accuracy']:.4f} ({res['accuracy'] * 100:.2f}%)\n"
             )
@@ -669,11 +1389,12 @@ def save_detailed_report(results_dict, class_names):
             f.write(
                 f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}\n"
             )
-            f.write("-" * 80 + "\n")
+            f.write("-" * 100 + "\n")
 
             for i, cls in enumerate(class_names):
                 f.write(
-                    f"{cls:<15} {res['per_class_precision'][i]:<12.4f} "
+                    f"{cls:<15} "
+                    f"{res['per_class_precision'][i]:<12.4f} "
                     f"{res['per_class_recall'][i]:<12.4f} "
                     f"{res['per_class_f1'][i]:<12.4f} "
                     f"{int(res['per_class_support'][i]):<10}\n"
@@ -681,72 +1402,139 @@ def save_detailed_report(results_dict, class_names):
 
             f.write("\n")
 
-    print(f"\nDetailed report saved to: {report_path}")
+    logger.info(f"✓ Text report saved to: {report_path}")
+
+    # Save JSON report
+    json_report = {
+        "metadata": {
+            "generated_at": datetime.now().isoformat(),
+            "config": {
+                "data_root": config.data_root,
+                "img_size": config.img_size,
+                "batch_size": config.batch_size,
+                "epochs": config.epochs,
+                "learning_rate": config.learning_rate,
+                "fine_tune_lr": config.fine_tune_lr,
+                "use_focal_loss": config.use_focal_loss,
+                "use_class_weights": config.use_class_weights,
+                "use_tta": config.use_tta,
+            },
+        },
+        "models": {},
+    }
+
+    for name, res in results.items():
+        json_report["models"][name] = {
+            "accuracy": float(res["accuracy"]),
+            "macro_avg": {k: float(v) for k, v in res["macro_avg"].items()},
+            "weighted_avg": {k: float(v) for k, v in res["weighted_avg"].items()},
+            "per_class": {
+                class_names[i]: {
+                    "precision": float(res["per_class_precision"][i]),
+                    "recall": float(res["per_class_recall"][i]),
+                    "f1": float(res["per_class_f1"][i]),
+                    "support": int(res["per_class_support"][i]),
+                }
+                for i in range(len(class_names))
+            },
+        }
+
+    with open(f"{config.output_dir}/report.json", "w") as f:
+        json.dump(json_report, f, indent=2)
+
+    logger.info("✓ JSON report saved")
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
 
 
 def main():
-    print("=" * 80)
-    print("ENHANCED WASTE SORTING CNN MODEL WITH COMPREHENSIVE XAI ANALYSIS")
-    print("=" * 80)
+    """Main execution function"""
+    print("\n" + "=" * 100)
+    print("IMPROVED WASTE SORTING MODEL COMPARISON SYSTEM")
+    print("=" * 100 + "\n")
 
-    print("\n[1/7] Loading data...")
-    train_gen, val_gen, test_gen, class_names = load_data()
-    print(f"Classes: {class_names}")
-    print(
-        f"Train: {train_gen.samples}, Val: {val_gen.samples}, Test: {test_gen.samples}"
+    start_time = time.time()
+
+    set_seed(42)
+
+    if config.use_mixed_precision:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        logger.info("✓ Mixed precision training enabled")
+
+    logger.info("\n[1/7] Loading data with optimized pipeline...")
+    data_loader = OptimizedDataLoader(config)
+    train_ds, val_ds, test_ds, class_names, class_weights = data_loader.load_data()
+    logger.info(f"✓ Classes: {class_names}")
+
+    logger.info("\n[2/7] Training models...")
+    trainer = SequentialTrainer(config)
+    results = trainer.train_all_models(
+        train_ds, val_ds, test_ds, class_names, class_weights
     )
-    print(f"Class distribution in training set:")
-    for cls, count in zip(class_names, np.bincount(train_gen.classes)):
-        print(f"  {cls}: {count} samples ({count / train_gen.samples * 100:.1f}%)")
 
-    print("\n[2/7] Training models...")
-    # Include DenseNet121 based on SOTA results
-    models = ["ResNet50", "EfficientNetB0", "MobileNetV2", "DenseNet121"]
-    results = {}
+    logger.info("\n[3/7] Generating training curves...")
+    plot_training_curves(results, config)
 
-    for arch in models:
-        results[arch] = train_and_evaluate(arch, train_gen, val_gen, test_gen)
+    logger.info("\n[4/7] Generating confusion matrices...")
+    plot_confusion_matrices(results, class_names, config)
 
-    print("\n[3/7] Generating comparison table...")
-    comparison_df = generate_comparison_table(results, class_names)
+    logger.info("\n[5/7] Generating per-class metrics...")
+    plot_per_class_metrics(results, class_names, config)
 
-    print("\n[4/7] Generating training curves...")
-    plot_training_curves(results)
+    logger.info("\n[6/7] Saving comprehensive report...")
+    save_comprehensive_report(results, class_names, config)
 
-    print("\n[5/7] Generating confusion matrices...")
-    plot_individual_confusion_matrices(results, class_names)
+    best_model_name = max(results.items(), key=lambda x: x["accuracy"])
+    logger.info(
+        f"\n[7/7] Generating XAI visualizations for best model: {best_model_name}"
+    )
 
-    print("\n[6/7] Generating per-class metrics...")
-    plot_per_class_metrics(results, class_names)
-
-    # Find best model
-    best_model = max(results.items(), key=lambda x: x[1]["accuracy"])
-    best_model_name = best_model[0]
-
-    print(f"\n[7/7] Generating XAI visualizations for {best_model_name}...")
-    generate_xai_figure(
-        best_model[1]["model"],
-        os.path.join(DATA_ROOT, "test"),
+    test_dir = os.path.join(config.data_root, "test")
+    generate_xai_visualizations_parallel(
+        results[best_model_name]["model_path"],
+        test_dir,
         class_names,
         best_model_name,
-        num_samples=len(class_names),
+        config,
     )
 
-    print("\n[8/7] Saving detailed report...")
-    save_detailed_report(results, class_names)
+    total_time = time.time() - start_time
 
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
-    print(f"\nBest model: {best_model_name}")
+    print("\n" + "=" * 100)
+    print("EXECUTION SUMMARY")
+    print("=" * 100)
+
+    sorted_results = sorted(results.items(), key=lambda x: x["accuracy"], reverse=True)
+
+    print("\nModel Rankings:")
+    for rank, (name, res) in enumerate(sorted_results, 1):
+        print(f"{rank}. {name}")
+        print(f"   Accuracy: {res['accuracy']:.4f} ({res['accuracy'] * 100:.2f}%)")
+        print(f"   Macro F1: {res['macro_avg']['f1-score']:.4f}")
+        print(f"   Weighted F1: {res['weighted_avg']['f1-score']:.4f}")
+
     print(
-        f"  Accuracy: {best_model[1]['accuracy']:.4f} ({best_model[1]['accuracy'] * 100:.2f}%)"
+        f"\n✓ Best Model: {best_model_name} (Accuracy: {results[best_model_name]['accuracy']:.4f})"
     )
-    print(f"  Macro F1: {best_model[1]['macro_avg']['f1-score']:.4f}")
-    print(f"  Weighted F1: {best_model[1]['weighted_avg']['f1-score']:.4f}")
-    print(f"\nAll outputs saved to: {OUTPUT_DIR}/")
-    print("=" * 80)
+    print(
+        f"✓ Total execution time: {total_time / 60:.1f} minutes ({total_time:.1f} seconds)"
+    )
+    print(f"✓ All outputs saved to: {config.output_dir}/")
+    print(f"✓ Models saved to: {config.output_dir}/models/")
+    print(
+        f"✓ XAI visualizations: {config.output_dir}/xai_visualizations/{best_model_name}/"
+    )
+    print("=" * 100 + "\n")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("\n\nTraining interrupted by user")
+    except Exception as e:
+        logger.exception(f"\n\nError during execution: {e}")
+        raise
