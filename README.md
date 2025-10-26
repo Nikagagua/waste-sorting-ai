@@ -5,39 +5,104 @@
 
 ## What This Project Does
 
-Imagine a recycling facility processing thousands of items per hour. Workers manually sort waste into different bins - plastic here, metal there, paper over there. It's slow, tiring, and mistakes happen. What if a computer could do this automatically?
-
-That's what this project tackles. But here's the catch: if the computer just says "this is plastic" without explaining why, plant managers won't trust it. So we built a system that not only classifies waste but shows its reasoning.
+This system automates the sorting of waste items like plastic, metal, and paper in recycling facilities, emphasizing not only high accuracy but also transparent reasoning for each classification decision. It supports operators by explaining why each item is classified a certain way.
 
 ## The Challenge
 
-Modern deep learning models are very accurate but operate as "black boxes." You feed in an image of a bottle, it says "plastic," but you don't know if it recognized the bottle shape, the transparency, or just memorized patterns from training data.
-
-For recycling facilities, this opacity is a dealbreaker. Operators need to understand:
-
+Most deep learning models behave like black boxes. Operators need to know:
 - Why did the system classify this item as plastic?
-- Is it focusing on the right features?
-- Can we trust it with difficult cases?
+- Which features contributed most?
+- Is it trustworthy with difficult cases?
 
-This project addresses these questions using explainable AI methods.
+This project applies explainable AI methods to address these concerns.
 
 ## Our Approach
 
-We compare four optimized neural network architectures:
+Four neural network architectures compared:
+- **EfficientNetV2B0** – Accurate and efficient (90-95%)
+- **ResNet50** – Deep model with skip connections (88-92%)
+- **MobileNetV2** – Lightweight for edge deployment (87-91%)
+- **DenseNet121** – Feature reuse focused (85-90%)
 
-- **EfficientNetV2B0** - Best accuracy-efficiency balance (90-95%)
-- **ResNet50** - Deep network with skip connections (88-92%)
-- **MobileNetV2** - Lightweight, runs on edge devices (87-91%)
-- **DenseNet121** - Efficient feature reuse (85-90%)
-
-Then we apply four explanation methods to visualize what the models "see":
-
-- **Grad-CAM** - Gradient-weighted class activation mapping
-- **Occlusion Sensitivity** - Block parts of the image, see what matters
-- **Integrated Gradients** - Measure how each pixel contributes
-- **LIME** - Highlight the most important regions
+Explanations use:
+- **Grad-CAM** – Visualize gradient activation mapping
+- **Occlusion Sensitivity** – Block areas to see impact
+- **Integrated Gradients** – Pixel-level contribution map
+- **LIME** – Highlights relevant regions
 
 ## The Dataset
+
+Based on TrashNet (Stanford), with additional optimized samples to improve class balance and edge-case performance.
+
+## Installation
+
+### Prerequisites
+- Python >= 3.11.11
+
+### Setup Instructions
+```bash
+git clone https://github.com/your-repo/waste-sorting-ai.git
+cd waste-sorting-ai
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Key Python dependencies:
+black, jinja2, keras, lime, matplotlib, numpy, opencv-contrib-python, openpyxl, pandas, pyyaml, scikit-image, scikit-learn, seaborn
+
+## Usage
+
+- Download dataset or update:
+  ```bash
+  python download_data.py
+  ```
+- Compare neural models:
+  ```bash
+  python model_comparison.py
+  ```
+- Monitor training runs:
+  ```bash
+  ./monitor_training.sh
+  ```
+
+## Outputs
+
+- `optimized_outputs/` – Best trained model files and outputs
+- `xai_visualizations/` – Explainability outputs
+- `training_curves/` – Learning progress curves
+- `per_class_metrics/` – Per-class analysis
+- Training logs – Located in root for each experiment and model improvement
+
+## Documentation
+
+See additional guides in `docs/`:
+- `docs/TUTORIAL.md` – Detailed tutorial for configuration and training
+- `docs/RESULTS_GUIDE.md` – Explanation for output interpretation
+- `IMPROVEMENTS.md` – Recent optimizations and bug fixes
+
+## Citation
+
+If you use this work:
+```bibtex
+@misc{gagua2025wastesorting,
+  author = {Gagua, Nika},
+  title = {An Explainable AI based Decision Support System for Waste Sorting Systems},
+  year = {2025}
+}
+```
+
+## Acknowledgments
+
+TrashNet dataset created by Gary Thung and Mindy Yang at Stanford University.
+Built with TensorFlow, Keras, scikit-learn, LIME, and OpenCV.
+
+## Contact
+
+Questions? Reach out at Nika.Gagua@kiu.edu.ge
+
+---
+
 
 We use TrashNet, a standard benchmark with 2,527 images across six categories:
 
