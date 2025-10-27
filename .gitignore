@@ -63,3 +63,4 @@ uv.lock
 poetry.lock
 Pipfile.lock
 *.docx
+.claude
