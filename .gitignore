@@ -31,24 +31,43 @@ env/
 .AppleDouble
 .LSOverride
 
-# Data (large files)
-data/raw/
-data/processed/
+# Data (large files - dataset is downloaded via script)
+data/
+!data/.gitkeep
+
+# Trained models (too large for GitHub, 645MB total)
+optimized_outputs/models/
+optimized_outputs/checkpoints/
+optimized_outputs/logs/
 *.h5
 *.hdf5
+*.keras
 *.pkl
 *.pickle
 
-# Model outputs
-paper_outputs/*.pdf
-!paper_outputs/.gitkeep
+# Keep visualizations and reports (these are useful for documentation)
+!optimized_outputs/confusion_matrices/
+!optimized_outputs/training_curves/
+!optimized_outputs/per_class_metrics/
+!optimized_outputs/*.png
+!optimized_outputs/*.txt
+!optimized_outputs/*.json
 
-# Keep structure
-!paper_outputs/
-
-# Logs
+# Training logs (generated during runs)
 *.log
+training_*.log
 logs/
+
+# Thesis documents (personal submission files, not needed in public repo)
+*.docx
+*Thesis*.docx
+EMAIL_TEMPLATE.txt
+README_SUBMISSION.txt
+SUBMISSION_GUIDE.md
+THESIS_EMAIL_WITH_FIGURES.md
+generate_thesis_document.py
+generate_human_thesis.py
+An Explainable*.docx
 
 # Temporary files
 tmp/
@@ -58,9 +77,10 @@ temp/
 # OS
 Thumbs.db
 
-# Package managers
+# Package managers (uv.lock is large and auto-generated)
 uv.lock
 poetry.lock
 Pipfile.lock
-*.docx
-.claude
+
+# Claude Code settings (IDE specific)
+.claude/

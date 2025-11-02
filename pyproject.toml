@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11.11"
 dependencies = [
     "black>=25.9.0",
+    "docx>=0.2.4",
     "jinja2>=3.1.2",
     "keras>=3.11.3",
     "lime>=0.2.0.1",
